@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spacexai-client"
+version = "0.1.0"
+description = "Async Python client for SpaceXAI OAuth and Grok subscription APIs"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeff Glousher" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "aiohttp>=3.12.15",
+  "httpx>=0.28.1",
+  "openai==2.45.0",
+]
+
+[project.urls]
+Changelog = "https://github.com/jeffglousher/spacexai-client/blob/main/CHANGELOG.md"
+Repository = "https://github.com/jeffglousher/spacexai-client"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spacexai_client"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["COM812", "CPY001", "D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG002", "PLR2004", "S101", "S105"]
