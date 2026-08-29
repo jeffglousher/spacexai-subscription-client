@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spacexai-subscription-client"
-version = "0.3.0"
+version = "0.4.0"
 description = "Unofficial async Python client for SpaceXAI OAuth subscription APIs"
 readme = "README.md"
 requires-python = ">=3.12"

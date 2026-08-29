@@ -7,10 +7,10 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import openai
-from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
+from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout, FormData
 from httpx import AsyncClient as HttpxClient
 from openai.types.responses import (
     EasyInputMessageParam,
@@ -39,12 +39,20 @@ from .const import (
     IMAGES_EDIT_URL,
     IMAGES_URL,
     MAX_IMAGE_SIZE,
+    MAX_STT_SIZE,
+    MAX_TTS_SIZE,
     MODEL_CATALOG_TIMEOUT,
     OAUTH_REFERRER,
     OAUTH_SCOPES,
     RESPONSE_TIMEOUT,
     SDK_MAX_RETRIES,
+    SPEECH_TIMEOUT,
+    STT_URL,
     TOKEN_URL,
+    TTS_MAX_SPEED,
+    TTS_MAX_TEXT_LENGTH,
+    TTS_MIN_SPEED,
+    TTS_URL,
     USERINFO_URL,
 )
 from .errors import (
@@ -333,6 +341,101 @@ class SpaceXAISubscriptionClient:
         except ClientError as err:
             raise ConnectionFailureError from err
         return payload
+
+    async def async_transcribe(
+        self,
+        access_token: str,
+        *,
+        audio: bytes,
+        filename: str,
+        media_type: str,
+        language: str | None = None,
+    ) -> str:
+        """Transcribe an audio file."""
+        if not audio or len(audio) > MAX_STT_SIZE:
+            message = f"Transcription audio must contain 1-{MAX_STT_SIZE} bytes"
+            raise ValueError(message)
+        if not filename or not media_type:
+            message = "Transcription filename and media type cannot be empty"
+            raise ValueError(message)
+        if language == "":
+            message = "Transcription language cannot be empty"
+            raise ValueError(message)
+        form = FormData()
+        if language is not None:
+            form.add_field("format", "true")
+            form.add_field("language", language)
+        form.add_field("file", audio, filename=filename, content_type=media_type)
+        try:
+            async with self._websession.post(
+                STT_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                data=form,
+                timeout=ClientTimeout(total=SPEECH_TIMEOUT),
+            ) as response:
+                payload = await _async_json(response)
+                _raise_for_status(response.status, payload)
+        except SpaceXAISubscriptionError:
+            raise
+        except TimeoutError as err:
+            raise RequestTimeoutError from err
+        except ClientError as err:
+            raise ConnectionFailureError from err
+        try:
+            return _required_string(payload, "text")
+        except (KeyError, TypeError) as err:
+            raise InvalidResponseError from err
+
+    async def async_synthesize_speech(  # noqa: PLR0913
+        self,
+        access_token: str,
+        *,
+        text: str,
+        voice_id: str,
+        language: str,
+        speed: float = 1.0,
+        codec: Literal["mp3", "pcm", "wav"] = "mp3",
+    ) -> bytes:
+        """Synthesize speech as raw audio bytes."""
+        if not text or len(text) > TTS_MAX_TEXT_LENGTH:
+            message = f"Speech text must contain 1-{TTS_MAX_TEXT_LENGTH} characters"
+            raise ValueError(message)
+        if not voice_id or not language:
+            message = "Speech voice and language cannot be empty"
+            raise ValueError(message)
+        if not TTS_MIN_SPEED <= speed <= TTS_MAX_SPEED:
+            message = (
+                f"Speech speed must be between {TTS_MIN_SPEED} and {TTS_MAX_SPEED}"
+            )
+            raise ValueError(message)
+        if codec not in ("mp3", "pcm", "wav"):
+            message = f"Unsupported speech codec: {codec}"
+            raise ValueError(message)
+        try:
+            async with self._websession.post(
+                TTS_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={
+                    "text": text,
+                    "voice_id": voice_id,
+                    "language": language,
+                    "speed": speed,
+                    "output_format": {"codec": codec},
+                },
+                timeout=ClientTimeout(total=SPEECH_TIMEOUT),
+            ) as response:
+                if response.status >= HTTPStatus.BAD_REQUEST:
+                    _raise_for_status(response.status, await _async_json(response))
+                audio = await response.content.read(MAX_TTS_SIZE + 1)
+        except SpaceXAISubscriptionError:
+            raise
+        except TimeoutError as err:
+            raise RequestTimeoutError from err
+        except ClientError as err:
+            raise ConnectionFailureError from err
+        if not audio or len(audio) > MAX_TTS_SIZE:
+            raise InvalidResponseError
+        return audio
 
     def _sdk(self, access_token: str) -> openai.AsyncOpenAI:
         """Return a request-scoped SDK client with the current access token."""

@@ -44,6 +44,9 @@ from spacexai_subscription_client.const import (
     OAUTH_SCOPES,
     RESPONSE_TIMEOUT,
     SDK_MAX_RETRIES,
+    SPEECH_TIMEOUT,
+    STT_URL,
+    TTS_URL,
 )
 
 
@@ -54,6 +57,7 @@ class MockResponse:
         """Initialize a response."""
         self.status = status
         self._payload = payload
+        self.content = self
 
     async def __aenter__(self) -> Self:
         """Enter the response context."""
@@ -67,6 +71,12 @@ class MockResponse:
         if isinstance(self._payload, Exception):
             raise self._payload
         return self._payload
+
+    async def read(self, size: int = -1) -> bytes:
+        """Return the configured byte payload."""
+        if not isinstance(self._payload, bytes):
+            raise TypeError
+        return self._payload[:size]
 
 
 def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
@@ -498,8 +508,8 @@ async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> Non
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
     assert sdk.constructor.call_args.kwargs["default_headers"] == {
         **GROK_CLI_REQUEST_HEADERS,
-        "User-Agent": "spacexai-subscription-client/0.3.0",
-        "x-grok-client-version": "0.3.0",
+        "User-Agent": "spacexai-subscription-client/0.4.0",
+        "x-grok-client-version": "0.4.0",
     }
 
 
@@ -1110,4 +1120,267 @@ async def test_completion_invalid_response(
             model="grok-4.6",
             input_data=[],
             tools=[],
+        )
+
+
+async def test_transcribe(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Transcribe audio with ordered multipart fields."""
+    websession.post.return_value = MockResponse(200, {"text": "Turn on the lamp"})
+
+    text = await client.async_transcribe(
+        "access-token",
+        audio=b"audio",
+        filename="speech.wav",
+        media_type="audio/wav",
+        language="en",
+    )
+
+    assert text == "Turn on the lamp"
+    request = websession.post.call_args
+    assert request.args == (STT_URL,)
+    assert request.kwargs["headers"] == {"Authorization": "Bearer access-token"}
+    assert request.kwargs["timeout"].total == SPEECH_TIMEOUT
+    fields = request.kwargs["data"]._fields
+    assert [field[0]["name"] for field in fields] == ["format", "language", "file"]
+    assert fields[-1][0]["filename"] == "speech.wav"
+    assert fields[-1][2] == b"audio"
+
+
+async def test_transcribe_without_language(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Let the service detect language without requesting formatting."""
+    websession.post.return_value = MockResponse(200, {"text": "Turn on the lamp"})
+
+    await client.async_transcribe(
+        "access-token",
+        audio=b"audio",
+        filename="speech.wav",
+        media_type="audio/wav",
+    )
+
+    fields = websession.post.call_args.kwargs["data"]._fields
+    assert [field[0]["name"] for field in fields] == ["file"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        pytest.param({}, 200, id="missing_text"),
+        pytest.param({"text": ""}, 200, id="empty_text"),
+        pytest.param(ValueError(), 200, id="invalid_json"),
+        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+    ],
+)
+async def test_transcribe_error(
+    client: SpaceXAISubscriptionClient,
+    payload: object,
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Reject malformed and failed transcription responses."""
+    websession.post.return_value = MockResponse(status, payload)
+    expected = AuthenticationError if status == 401 else InvalidResponseError
+
+    with pytest.raises(expected):
+        await client.async_transcribe(
+            "access-token",
+            audio=b"audio",
+            filename="speech.wav",
+            media_type="audio/wav",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        pytest.param({"audio": b""}, "1-", id="empty_audio"),
+        pytest.param({"filename": ""}, "filename", id="empty_filename"),
+        pytest.param({"media_type": ""}, "media type", id="empty_media_type"),
+        pytest.param({"language": ""}, "language", id="empty_language"),
+    ],
+)
+async def test_transcribe_validation(
+    client: SpaceXAISubscriptionClient,
+    kwargs: dict[str, Any],
+    match: str,
+    websession: MagicMock,
+) -> None:
+    """Validate transcription inputs before making a request."""
+    arguments: dict[str, Any] = {
+        "audio": b"audio",
+        "filename": "speech.wav",
+        "media_type": "audio/wav",
+        **kwargs,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        await client.async_transcribe("access-token", **arguments)
+
+    websession.post.assert_not_called()
+
+
+async def test_transcribe_oversized_input(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Bound transcription audio held in memory."""
+    with (
+        patch("spacexai_subscription_client.client.MAX_STT_SIZE", 1),
+        pytest.raises(ValueError, match="1-1"),
+    ):
+        await client.async_transcribe(
+            "access-token",
+            audio=b"too-large",
+            filename="speech.wav",
+            media_type="audio/wav",
+        )
+
+    websession.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error"),
+    [
+        pytest.param(TimeoutError(), RequestTimeoutError, id="timeout"),
+        pytest.param(ClientError(), ConnectionFailureError, id="connection"),
+    ],
+)
+async def test_transcribe_transport_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    side_effect: Exception,
+    websession: MagicMock,
+) -> None:
+    """Translate transcription transport failures."""
+    websession.post.side_effect = side_effect
+
+    with pytest.raises(expected_error):
+        await client.async_transcribe(
+            "access-token",
+            audio=b"audio",
+            filename="speech.ogg",
+            media_type="audio/ogg",
+        )
+
+
+async def test_synthesize_speech(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Return synthesized speech bytes."""
+    websession.post.return_value = MockResponse(200, b"speech")
+
+    audio = await client.async_synthesize_speech(
+        "access-token",
+        text="Welcome home",
+        voice_id="eve",
+        language="en",
+        speed=1.1,
+        codec="wav",
+    )
+
+    assert audio == b"speech"
+    request = websession.post.call_args
+    assert request.args == (TTS_URL,)
+    assert request.kwargs["headers"] == {"Authorization": "Bearer access-token"}
+    assert request.kwargs["timeout"].total == SPEECH_TIMEOUT
+    assert request.kwargs["json"] == {
+        "text": "Welcome home",
+        "voice_id": "eve",
+        "language": "en",
+        "speed": 1.1,
+        "output_format": {"codec": "wav"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        pytest.param({"text": ""}, "1-15000", id="empty_text"),
+        pytest.param({"text": "x" * 15001}, "1-15000", id="long_text"),
+        pytest.param({"speed": 0.6}, "between 0.7", id="slow"),
+        pytest.param({"speed": 1.6}, "between 0.7", id="fast"),
+        pytest.param({"voice_id": ""}, "voice", id="empty_voice"),
+        pytest.param({"language": ""}, "language", id="empty_language"),
+        pytest.param({"codec": "flac"}, "Unsupported", id="codec"),
+    ],
+)
+async def test_synthesize_speech_validation(
+    client: SpaceXAISubscriptionClient,
+    kwargs: dict[str, Any],
+    match: str,
+    websession: MagicMock,
+) -> None:
+    """Validate synthesis inputs before making a request."""
+    arguments: dict[str, Any] = {
+        "text": "Hello",
+        "voice_id": "eve",
+        "language": "en",
+        **kwargs,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        await client.async_synthesize_speech("access-token", **arguments)
+
+    websession.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error"),
+    [
+        pytest.param(TimeoutError(), RequestTimeoutError, id="timeout"),
+        pytest.param(ClientError(), ConnectionFailureError, id="connection"),
+    ],
+)
+async def test_synthesize_speech_transport_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    side_effect: Exception,
+    websession: MagicMock,
+) -> None:
+    """Translate synthesis transport failures."""
+    websession.post.side_effect = side_effect
+
+    with pytest.raises(expected_error):
+        await client.async_synthesize_speech(
+            "access-token", text="Hello", voice_id="eve", language="en"
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "status"),
+    [
+        pytest.param(b"", 200, id="empty_audio"),
+        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+    ],
+)
+async def test_synthesize_speech_error(
+    client: SpaceXAISubscriptionClient,
+    payload: object,
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Reject empty audio and failed synthesis responses."""
+    websession.post.return_value = MockResponse(status, payload)
+    expected = AuthenticationError if status == 401 else InvalidResponseError
+
+    with pytest.raises(expected):
+        await client.async_synthesize_speech(
+            "access-token", text="Hello", voice_id="eve", language="en"
+        )
+
+
+async def test_synthesize_speech_oversized_response(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Bound synthesized speech held in memory."""
+    websession.post.return_value = MockResponse(200, b"too-large")
+
+    with (
+        patch("spacexai_subscription_client.client.MAX_TTS_SIZE", 1),
+        pytest.raises(InvalidResponseError),
+    ):
+        await client.async_synthesize_speech(
+            "access-token", text="Hello", voice_id="eve", language="en"
         )

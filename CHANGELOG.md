@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Add batch speech transcription.
+- Add unary text-to-speech synthesis with language, voice, speed, and codec controls.
+
 ## 0.3.0
 
 - Add structured response formats for AI data tasks.
