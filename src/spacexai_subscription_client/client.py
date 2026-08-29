@@ -2,9 +2,10 @@
 
 import asyncio
 import base64
+import binascii
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -14,12 +15,14 @@ from httpx import AsyncClient as HttpxClient
 from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
+    ResponseFormatTextJSONSchemaConfigParam,
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
     ResponseInputFileParam,
     ResponseInputImageParam,
     ResponseInputParam,
     ResponseInputTextParam,
+    ResponseTextConfigParam,
     ToolParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput
@@ -32,6 +35,10 @@ from .const import (
     GROK_CLI_REQUEST_HEADERS,
     GROK_OAUTH_REQUEST_HEADERS,
     HTTP_TIMEOUT,
+    IMAGE_TIMEOUT,
+    IMAGES_EDIT_URL,
+    IMAGES_URL,
+    MAX_IMAGE_SIZE,
     MODEL_CATALOG_TIMEOUT,
     OAUTH_REFERRER,
     OAUTH_SCOPES,
@@ -56,14 +63,18 @@ from .models import (
     BuiltinTool,
     Completion,
     DeviceAuthorization,
+    GeneratedImage,
     InputItem,
     Message,
     OAuthToken,
+    ResponseFormat,
     ResponseTool,
     ToolCall,
 )
 
 _TIMEOUT = ClientTimeout(total=HTTP_TIMEOUT)
+_MAX_EDIT_IMAGES = 5
+_WEBP_HEADER_SIZE = 12
 
 
 class SpaceXAISubscriptionClient:
@@ -217,6 +228,7 @@ class SpaceXAISubscriptionClient:
         model: str,
         input_data: Sequence[InputItem],
         tools: Sequence[ResponseTool],
+        response_format: ResponseFormat | None = None,
     ) -> Completion:
         """Create a non-streaming Grok response."""
         try:
@@ -225,6 +237,7 @@ class SpaceXAISubscriptionClient:
                 input=_format_input(input_data),
                 tools=[_format_tool(tool) for tool in tools],
                 parallel_tool_calls=False,
+                text=_format_response_text(response_format),
                 extra_headers={"x-grok-model-override": model},
                 timeout=RESPONSE_TIMEOUT,
             )
@@ -246,6 +259,80 @@ class SpaceXAISubscriptionClient:
         if not response.output_text and not tool_calls:
             raise InvalidResponseError
         return Completion(response.output_text or "", tool_calls)
+
+    async def async_generate_image(
+        self,
+        access_token: str,
+        *,
+        model: str,
+        prompt: str,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+    ) -> GeneratedImage:
+        """Generate an image from a prompt."""
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": 1,
+            "response_format": "b64_json",
+        }
+        if aspect_ratio is not None:
+            body["aspect_ratio"] = aspect_ratio
+        if resolution is not None:
+            body["resolution"] = resolution
+        payload = await self._async_image_request(access_token, IMAGES_URL, body)
+        return _parse_generated_image(payload, model)
+
+    async def async_edit_image(
+        self,
+        access_token: str,
+        *,
+        model: str,
+        prompt: str,
+        images: Sequence[Attachment],
+        aspect_ratio: str | None = None,
+    ) -> GeneratedImage:
+        """Edit an image using up to five references."""
+        if not 1 <= len(images) <= _MAX_EDIT_IMAGES:
+            message = "Image editing requires between one and five images"
+            raise ValueError(message)
+        image_objects = [
+            {"type": "image_url", "url": _format_image_data_url(image)}
+            for image in images
+        ]
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "response_format": "b64_json",
+        }
+        body["image" if len(image_objects) == 1 else "images"] = (
+            image_objects[0] if len(image_objects) == 1 else image_objects
+        )
+        if aspect_ratio is not None:
+            body["aspect_ratio"] = aspect_ratio
+        payload = await self._async_image_request(access_token, IMAGES_EDIT_URL, body)
+        return _parse_generated_image(payload, model)
+
+    async def _async_image_request(
+        self, access_token: str, url: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Request an image operation and return its JSON payload."""
+        try:
+            async with self._websession.post(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                json=body,
+                timeout=ClientTimeout(total=IMAGE_TIMEOUT),
+            ) as response:
+                payload = await _async_json(response)
+                _raise_for_status(response.status, payload)
+        except SpaceXAISubscriptionError:
+            raise
+        except TimeoutError as err:
+            raise RequestTimeoutError from err
+        except ClientError as err:
+            raise ConnectionFailureError from err
+        return payload
 
     def _sdk(self, access_token: str) -> openai.AsyncOpenAI:
         """Return a request-scoped SDK client with the current access token."""
@@ -332,6 +419,37 @@ def _format_attachment(
     raise ValueError(message)
 
 
+def _format_image_data_url(attachment: Attachment) -> str:
+    """Convert an image attachment to a data URL."""
+    if attachment.media_type not in ("image/jpeg", "image/png", "image/webp"):
+        message = f"Unsupported edit image type: {attachment.media_type}"
+        raise ValueError(message)
+    if not attachment.data:
+        message = "Edit images require data"
+        raise ValueError(message)
+    encoded = base64.b64encode(attachment.data).decode()
+    return f"data:{attachment.media_type};base64,{encoded}"
+
+
+def _format_response_text(
+    response_format: ResponseFormat | None,
+) -> ResponseTextConfigParam | openai.Omit:
+    """Convert an optional structured response format."""
+    if response_format is None:
+        return openai.omit
+    if not response_format.name:
+        message = "Structured responses require a name"
+        raise ValueError(message)
+    return ResponseTextConfigParam(
+        format=ResponseFormatTextJSONSchemaConfigParam(
+            type="json_schema",
+            name=response_format.name,
+            schema=dict(response_format.schema),
+            strict=True,
+        )
+    )
+
+
 def _format_tool(tool: ResponseTool) -> ToolParam:
     """Convert a normalized tool to an SDK request object."""
     if isinstance(tool, BuiltinTool):
@@ -356,6 +474,53 @@ def _parse_tool_call(item: ResponseFunctionToolCall) -> ToolCall:
     if not isinstance(arguments, dict):
         raise InvalidResponseError
     return ToolCall(item.call_id, item.name, arguments)
+
+
+def _parse_generated_image(payload: object, model: str) -> GeneratedImage:
+    """Validate and normalize an Imagine API response."""
+    if not isinstance(payload, Mapping):
+        raise InvalidResponseError
+    entries = payload.get("data")
+    if not isinstance(entries, list) or not entries:
+        raise InvalidResponseError
+    first = entries[0]
+    if not isinstance(first, Mapping):
+        raise InvalidResponseError
+    encoded = first.get("b64_json")
+    if not isinstance(encoded, str) or not encoded:
+        raise InvalidResponseError
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as err:
+        raise InvalidResponseError from err
+    if not data or len(data) > MAX_IMAGE_SIZE:
+        raise InvalidResponseError
+    revised_prompt = first.get("revised_prompt")
+    if revised_prompt is not None and not isinstance(revised_prompt, str):
+        raise InvalidResponseError
+    return GeneratedImage(
+        data,
+        _image_media_type(data, first.get("mime_type")),
+        model,
+        revised_prompt,
+    )
+
+
+def _image_media_type(data: bytes, provider_type: object) -> str:
+    """Return the image media type from magic bytes or provider metadata."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if (
+        len(data) >= _WEBP_HEADER_SIZE
+        and data.startswith(b"RIFF")
+        and data[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    if isinstance(provider_type, str) and provider_type.startswith("image/"):
+        return provider_type
+    raise InvalidResponseError
 
 
 async def _async_json(response: ClientResponse) -> dict[str, Any]:

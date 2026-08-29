@@ -1,5 +1,6 @@
 """Tests for the public Grok subscription client."""
 
+import base64
 from collections.abc import Generator
 from typing import Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
@@ -19,10 +20,12 @@ from spacexai_subscription_client import (
     ConnectionFailureError,
     DeviceAuthorization,
     DeviceAuthorizationExpiredError,
+    GeneratedImage,
     InvalidResponseError,
     Message,
     RateLimitError,
     RequestTimeoutError,
+    ResponseFormat,
     SpaceXAISubscriptionClient,
     SpaceXAISubscriptionError,
     Tool,
@@ -33,6 +36,9 @@ from spacexai_subscription_client.const import (
     GROK_CLI_OAUTH_CLIENT_ID,
     GROK_CLI_REQUEST_HEADERS,
     GROK_OAUTH_REQUEST_HEADERS,
+    IMAGE_TIMEOUT,
+    IMAGES_EDIT_URL,
+    IMAGES_URL,
     MODEL_CATALOG_TIMEOUT,
     OAUTH_REFERRER,
     OAUTH_SCOPES,
@@ -492,8 +498,8 @@ async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> Non
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
     assert sdk.constructor.call_args.kwargs["default_headers"] == {
         **GROK_CLI_REQUEST_HEADERS,
-        "User-Agent": "spacexai-subscription-client/0.2.0",
-        "x-grok-client-version": "0.2.0",
+        "User-Agent": "spacexai-subscription-client/0.3.0",
+        "x-grok-client-version": "0.3.0",
     }
 
 
@@ -709,6 +715,304 @@ async def test_completion_formats_builtin_tools(
         {"type": "x_search"},
         {"type": "code_interpreter"},
     ]
+
+
+async def test_completion_formats_structured_response(
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
+) -> None:
+    """Request strict structured output using a named JSON schema."""
+    sdk.responses.create.return_value = MagicMock(output=[], output_text="{}")
+
+    await client.async_create_response(
+        "access-token",
+        model="grok-4.6",
+        input_data=[Message("user", "Return data")],
+        tools=[],
+        response_format=ResponseFormat("test_task", {}),
+    )
+
+    assert sdk.responses.create.call_args.kwargs["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "test_task",
+            "schema": {},
+            "strict": True,
+        }
+    }
+
+
+async def test_completion_rejects_unnamed_structured_response(
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
+) -> None:
+    """Reject a structured response without a schema name."""
+    with pytest.raises(ValueError, match="require a name"):
+        await client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Return data")],
+            tools=[],
+            response_format=ResponseFormat("", {}),
+        )
+    sdk.responses.create.assert_not_awaited()
+
+
+async def test_generate_image(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Generate and normalize a base64 image."""
+    image = b"\xff\xd8\xffimage"
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "data": [
+                {
+                    "b64_json": base64.b64encode(image).decode(),
+                    "revised_prompt": "A detailed rocket",
+                }
+            ]
+        },
+    )
+
+    result = await client.async_generate_image(
+        "access-token",
+        model="grok-imagine-image-2.0",
+        prompt="A rocket",
+        aspect_ratio="16:9",
+        resolution="1k",
+    )
+
+    assert result == GeneratedImage(
+        image,
+        "image/jpeg",
+        "grok-imagine-image-2.0",
+        "A detailed rocket",
+    )
+    request = websession.post.call_args
+    assert request.args == (IMAGES_URL,)
+    assert request.kwargs["headers"] == {"Authorization": "Bearer access-token"}
+    assert request.kwargs["json"] == {
+        "model": "grok-imagine-image-2.0",
+        "prompt": "A rocket",
+        "n": 1,
+        "response_format": "b64_json",
+        "aspect_ratio": "16:9",
+        "resolution": "1k",
+    }
+    assert request.kwargs["timeout"].total == IMAGE_TIMEOUT
+
+
+@pytest.mark.parametrize("image_count", [1, 2, 3, 5])
+async def test_edit_image(
+    client: SpaceXAISubscriptionClient, image_count: int, websession: MagicMock
+) -> None:
+    """Format one or more edit references as JSON data URLs."""
+    output = b"\x89PNG\r\n\x1a\nimage"
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "data": [
+                {
+                    "b64_json": base64.b64encode(output).decode(),
+                    "mime_type": "image/png",
+                }
+            ]
+        },
+    )
+    images = [
+        Attachment(f"{index}.png", "image/png", b"input")
+        for index in range(image_count)
+    ]
+
+    result = await client.async_edit_image(
+        "access-token",
+        model="grok-imagine-image-2.0",
+        prompt="Make it blue",
+        images=images,
+        aspect_ratio="1:1",
+    )
+
+    assert result.data == output
+    request = websession.post.call_args
+    assert request.args == (IMAGES_EDIT_URL,)
+    body = request.kwargs["json"]
+    key = "image" if image_count == 1 else "images"
+    expected_images = [
+        {"type": "image_url", "url": "data:image/png;base64,aW5wdXQ="}
+        for _index in range(image_count)
+    ]
+    assert body[key] == (expected_images[0] if image_count == 1 else expected_images)
+    assert body["aspect_ratio"] == "1:1"
+
+
+@pytest.mark.parametrize("image_count", [0, 6])
+async def test_edit_image_rejects_invalid_count(
+    client: SpaceXAISubscriptionClient, image_count: int, websession: MagicMock
+) -> None:
+    """Reject image edits outside the provider reference limit."""
+    with pytest.raises(ValueError, match="between one and five"):
+        await client.async_edit_image(
+            "access-token",
+            model="grok-imagine-image-2.0",
+            prompt="Edit",
+            images=[Attachment("a.png", "image/png", b"data")] * image_count,
+        )
+    websession.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        pytest.param(Attachment("a.gif", "image/gif", b"data"), id="type"),
+        pytest.param(Attachment("a.png", "image/png", b""), id="empty"),
+    ],
+)
+async def test_edit_image_rejects_invalid_attachment(
+    attachment: Attachment, client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Reject edit references the endpoint cannot consume."""
+    with pytest.raises(ValueError, match=r"Unsupported|require data"):
+        await client.async_edit_image(
+            "access-token",
+            model="grok-imagine-image-2.0",
+            prompt="Edit",
+            images=[attachment],
+        )
+    websession.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error"),
+    [
+        pytest.param(TimeoutError(), RequestTimeoutError, id="timeout"),
+        pytest.param(ClientError(), ConnectionFailureError, id="connection"),
+    ],
+)
+async def test_generate_image_transport_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    side_effect: Exception,
+    websession: MagicMock,
+) -> None:
+    """Translate image endpoint transport failures."""
+    websession.post.side_effect = side_effect
+
+    with pytest.raises(expected_error):
+        await client.async_generate_image(
+            "access-token", model="grok-imagine-image-2.0", prompt="Image"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [
+        pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(429, RateLimitError, id="rate_limit"),
+        pytest.param(500, ConnectionFailureError, id="server"),
+    ],
+)
+async def test_generate_image_http_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Translate image endpoint HTTP failures."""
+    websession.post.return_value = MockResponse(status, {"error": "failed"})
+
+    with pytest.raises(expected_error):
+        await client.async_generate_image(
+            "access-token", model="grok-imagine-image-2.0", prompt="Image"
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param([], id="not_object"),
+        pytest.param({}, id="missing_data"),
+        pytest.param({"data": ["image"]}, id="invalid_entry"),
+        pytest.param({"data": [{}]}, id="missing_image"),
+        pytest.param({"data": [{"b64_json": "%%%"}]}, id="invalid_base64"),
+        pytest.param({"data": [{"b64_json": ""}]}, id="empty_image"),
+        pytest.param(
+            {"data": [{"b64_json": base64.b64encode(b"unknown").decode()}]},
+            id="unknown_type",
+        ),
+        pytest.param(
+            {
+                "data": [
+                    {
+                        "b64_json": base64.b64encode(b"\xff\xd8\xffimage").decode(),
+                        "revised_prompt": 42,
+                    }
+                ]
+            },
+            id="invalid_revised_prompt",
+        ),
+    ],
+)
+async def test_generate_image_rejects_invalid_response(
+    client: SpaceXAISubscriptionClient, payload: object, websession: MagicMock
+) -> None:
+    """Reject malformed image responses."""
+    websession.post.return_value = MockResponse(200, payload)
+
+    with pytest.raises(InvalidResponseError):
+        await client.async_generate_image(
+            "access-token", model="grok-imagine-image-2.0", prompt="Image"
+        )
+
+
+@pytest.mark.parametrize(
+    ("data", "provider_type", "expected_type"),
+    [
+        pytest.param(b"RIFF0000WEBPdata", None, "image/webp", id="webp"),
+        pytest.param(b"image", "image/avif", "image/avif", id="provider"),
+    ],
+)
+async def test_generate_image_media_type(
+    client: SpaceXAISubscriptionClient,
+    data: bytes,
+    expected_type: str,
+    provider_type: str | None,
+    websession: MagicMock,
+) -> None:
+    """Detect supported image output types."""
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "data": [
+                {
+                    "b64_json": base64.b64encode(data).decode(),
+                    "mime_type": provider_type,
+                }
+            ]
+        },
+    )
+
+    result = await client.async_generate_image(
+        "access-token", model="grok-imagine-image-2.0", prompt="Image"
+    )
+
+    assert result.media_type == expected_type
+
+
+async def test_generate_image_rejects_oversized_output(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Bound decoded image output size."""
+    websession.post.return_value = MockResponse(
+        200,
+        {"data": [{"b64_json": base64.b64encode(b"\xff\xd8\xffdata").decode()}]},
+    )
+
+    with (
+        patch("spacexai_subscription_client.client.MAX_IMAGE_SIZE", 4),
+        pytest.raises(InvalidResponseError),
+    ):
+        await client.async_generate_image(
+            "access-token", model="grok-imagine-image-2.0", prompt="Image"
+        )
 
 
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)

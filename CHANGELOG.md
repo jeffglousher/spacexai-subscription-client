@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Add structured response formats for AI data tasks.
+- Add image generation and multi-image editing.
+
 ## 0.2.0
 
 - Add image and PDF attachments to user messages.

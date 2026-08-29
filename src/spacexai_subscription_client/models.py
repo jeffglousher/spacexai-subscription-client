@@ -112,6 +112,28 @@ class BuiltinTool:
     type: Literal["web_search", "x_search", "code_interpreter"]
 
 
+@dataclass(frozen=True, slots=True)
+class ResponseFormat:
+    """Named JSON schema requested for a structured response."""
+
+    name: str
+    schema: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        """Prevent mutation of the JSON schema."""
+        object.__setattr__(self, "schema", MappingProxyType(dict(self.schema)))
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedImage:
+    """Image returned by the SpaceXAI Imagine API."""
+
+    data: bytes
+    media_type: str
+    model: str
+    revised_prompt: str | None = None
+
+
 type InputItem = Message | ToolCall | ToolResult
 type ResponseTool = Tool | BuiltinTool
 
