@@ -1,5 +1,9 @@
 """Constants for the unofficial SpaceXAI subscription client."""
 
+from importlib.metadata import version
+
+PACKAGE_VERSION = version("spacexai-subscription-client")
+
 AUTHORIZE_URL = "https://auth.x.ai/oauth2/authorize"
 TOKEN_URL = "https://auth.x.ai/oauth2/token"  # noqa: S105
 USERINFO_URL = "https://auth.x.ai/oauth2/userinfo"
@@ -8,14 +12,14 @@ API_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 GROK_CLI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 GROK_OAUTH_REQUEST_HEADERS = {
     "x-grok-client-surface": "ui",
-    "x-grok-client-version": "0.1.0",
+    "x-grok-client-version": PACKAGE_VERSION,
 }
 GROK_CLI_REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "spacexai-subscription-client/0.1.0",
+    "User-Agent": f"spacexai-subscription-client/{PACKAGE_VERSION}",
     "x-xai-token-auth": "xai-grok-cli",
     "x-grok-client-identifier": "spacexai-subscription-client",
-    "x-grok-client-version": "0.1.0",
+    "x-grok-client-version": PACKAGE_VERSION,
 }
 OAUTH_SCOPES = (
     "openid",

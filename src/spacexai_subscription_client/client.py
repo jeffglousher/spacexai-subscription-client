@@ -1,11 +1,12 @@
 """Async client for SpaceXAI OAuth subscription APIs."""
 
 import asyncio
+import base64
 import json
 import time
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 import openai
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
@@ -15,7 +16,11 @@ from openai.types.responses import (
     FunctionToolParam,
     ResponseFunctionToolCall,
     ResponseFunctionToolCallParam,
+    ResponseInputFileParam,
+    ResponseInputImageParam,
     ResponseInputParam,
+    ResponseInputTextParam,
+    ToolParam,
 )
 from openai.types.responses.response_input_param import FunctionCallOutput
 
@@ -47,12 +52,14 @@ from .errors import (
 )
 from .models import (
     Account,
+    Attachment,
+    BuiltinTool,
     Completion,
     DeviceAuthorization,
     InputItem,
     Message,
     OAuthToken,
-    Tool,
+    ResponseTool,
     ToolCall,
 )
 
@@ -209,23 +216,14 @@ class SpaceXAISubscriptionClient:
         *,
         model: str,
         input_data: Sequence[InputItem],
-        tools: Sequence[Tool],
+        tools: Sequence[ResponseTool],
     ) -> Completion:
         """Create a non-streaming Grok response."""
         try:
             response = await self._sdk(access_token).responses.create(
                 model=model,
                 input=_format_input(input_data),
-                tools=[
-                    FunctionToolParam(
-                        type="function",
-                        name=tool.name,
-                        description=tool.description,
-                        parameters=dict(tool.parameters),
-                        strict=False,
-                    )
-                    for tool in tools
-                ],
+                tools=[_format_tool(tool) for tool in tools],
                 parallel_tool_calls=False,
                 extra_headers={"x-grok-model-override": model},
                 timeout=RESPONSE_TIMEOUT,
@@ -265,11 +263,28 @@ def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:
     result: ResponseInputParam = []
     for item in items:
         if isinstance(item, Message):
+            content: (
+                str
+                | list[
+                    ResponseInputTextParam
+                    | ResponseInputImageParam
+                    | ResponseInputFileParam
+                ]
+            ) = item.content
+            if item.attachments:
+                content = []
+                if item.content:
+                    content.append(
+                        ResponseInputTextParam(type="input_text", text=item.content)
+                    )
+                content.extend(
+                    _format_attachment(attachment) for attachment in item.attachments
+                )
             result.append(
                 EasyInputMessageParam(
                     type="message",
                     role=item.role,
-                    content=item.content,
+                    content=content,
                 )
             )
         elif isinstance(item, ToolCall):
@@ -290,6 +305,44 @@ def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:
                 )
             )
     return result
+
+
+def _format_attachment(
+    attachment: Attachment,
+) -> ResponseInputImageParam | ResponseInputFileParam:
+    """Convert a binary attachment to an SDK input part."""
+    if not attachment.filename or not attachment.data:
+        message = "Attachments require a filename and data"
+        raise ValueError(message)
+    encoded = base64.b64encode(attachment.data).decode()
+    data_url = f"data:{attachment.media_type};base64,{encoded}"
+    if attachment.media_type.startswith("image/"):
+        return ResponseInputImageParam(
+            type="input_image",
+            image_url=data_url,
+            detail="auto",
+        )
+    if attachment.media_type == "application/pdf":
+        return ResponseInputFileParam(
+            type="input_file",
+            filename=attachment.filename,
+            file_data=data_url,
+        )
+    message = f"Unsupported attachment type: {attachment.media_type}"
+    raise ValueError(message)
+
+
+def _format_tool(tool: ResponseTool) -> ToolParam:
+    """Convert a normalized tool to an SDK request object."""
+    if isinstance(tool, BuiltinTool):
+        return cast("ToolParam", {"type": tool.type})
+    return FunctionToolParam(
+        type="function",
+        name=tool.name,
+        description=tool.description,
+        parameters=dict(tool.parameters),
+        strict=False,
+    )
 
 
 def _parse_tool_call(item: ResponseFunctionToolCall) -> ToolCall:

@@ -48,11 +48,27 @@ class Account:
 
 
 @dataclass(frozen=True, slots=True)
+class Attachment:
+    """Binary content attached to a user message."""
+
+    filename: str
+    media_type: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """Conversation message sent to Grok."""
 
     role: Literal["user", "assistant", "developer"]
     content: str
+    attachments: tuple[Attachment, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate attachment placement."""
+        if self.attachments and self.role != "user":
+            message = "Attachments are only valid on user messages"
+            raise ValueError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +105,15 @@ class Tool:
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
 
 
+@dataclass(frozen=True, slots=True)
+class BuiltinTool:
+    """Provider-hosted tool enabled for a response."""
+
+    type: Literal["web_search", "x_search", "code_interpreter"]
+
+
 type InputItem = Message | ToolCall | ToolResult
+type ResponseTool = Tool | BuiltinTool
 
 
 @dataclass(frozen=True, slots=True)

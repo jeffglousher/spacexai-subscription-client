@@ -13,11 +13,14 @@ from .errors import (
 )
 from .models import (
     Account,
+    Attachment,
+    BuiltinTool,
     Completion,
     DeviceAuthorization,
     InputItem,
     Message,
     OAuthToken,
+    ResponseTool,
     Tool,
     ToolCall,
     ToolResult,
@@ -25,8 +28,10 @@ from .models import (
 
 __all__ = [
     "Account",
+    "Attachment",
     "AuthenticationError",
     "AuthorizationDeniedError",
+    "BuiltinTool",
     "Completion",
     "ConnectionFailureError",
     "DeviceAuthorization",
@@ -37,6 +42,7 @@ __all__ = [
     "OAuthToken",
     "RateLimitError",
     "RequestTimeoutError",
+    "ResponseTool",
     "SpaceXAISubscriptionClient",
     "SpaceXAISubscriptionError",
     "Tool",

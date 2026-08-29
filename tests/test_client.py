@@ -12,8 +12,10 @@ from openai.types.responses import ResponseFunctionToolCall
 
 from spacexai_subscription_client import (
     Account,
+    Attachment,
     AuthenticationError,
     AuthorizationDeniedError,
+    BuiltinTool,
     ConnectionFailureError,
     DeviceAuthorization,
     DeviceAuthorizationExpiredError,
@@ -29,6 +31,7 @@ from spacexai_subscription_client import (
 )
 from spacexai_subscription_client.const import (
     GROK_CLI_OAUTH_CLIENT_ID,
+    GROK_CLI_REQUEST_HEADERS,
     GROK_OAUTH_REQUEST_HEADERS,
     MODEL_CATALOG_TIMEOUT,
     OAUTH_REFERRER,
@@ -487,6 +490,11 @@ async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> Non
     assert models == ("grok-4.5", "grok-4.6")
     sdk.models.list.assert_awaited_once_with(timeout=MODEL_CATALOG_TIMEOUT)
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
+    assert sdk.constructor.call_args.kwargs["default_headers"] == {
+        **GROK_CLI_REQUEST_HEADERS,
+        "User-Agent": "spacexai-subscription-client/0.2.0",
+        "x-grok-client-version": "0.2.0",
+    }
 
 
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)
@@ -589,6 +597,118 @@ async def test_completion_formats_tool_history(
         },
     ]
     assert sdk.constructor.call_args_list[-1].kwargs["api_key"] == "new-access-token"
+
+
+async def test_completion_formats_attachments(
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
+) -> None:
+    """Format image and PDF attachments on a user message."""
+    sdk.responses.create.return_value = MagicMock(output=[], output_text="Done")
+
+    await client.async_create_response(
+        "access-token",
+        model="grok-4.6",
+        input_data=[
+            Message(
+                "user",
+                "Compare these files",
+                (
+                    Attachment("image.png", "image/png", b"image"),
+                    Attachment("document.pdf", "application/pdf", b"pdf"),
+                ),
+            )
+        ],
+        tools=[],
+    )
+
+    request: dict[str, Any] = sdk.responses.create.call_args.kwargs
+    assert request["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Compare these files"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aW1hZ2U=",
+                    "detail": "auto",
+                },
+                {
+                    "type": "input_file",
+                    "filename": "document.pdf",
+                    "file_data": "data:application/pdf;base64,cGRm",
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param(
+            Message("user", "", (Attachment("", "image/png", b"image"),)),
+            id="missing_filename",
+        ),
+        pytest.param(
+            Message("user", "", (Attachment("image.png", "image/png", b""),)),
+            id="empty_data",
+        ),
+        pytest.param(
+            Message("user", "", (Attachment("data.txt", "text/plain", b"data"),)),
+            id="unsupported_type",
+        ),
+    ],
+)
+async def test_completion_rejects_invalid_attachment(
+    client: SpaceXAISubscriptionClient, message: Message, sdk: MagicMock
+) -> None:
+    """Reject invalid attachment input before requesting a response."""
+    with pytest.raises(
+        ValueError, match=r"Attachments require|Unsupported attachment type"
+    ):
+        await client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[message],
+            tools=[],
+        )
+    sdk.responses.create.assert_not_awaited()
+
+
+def test_message_rejects_assistant_attachment() -> None:
+    """Reject attachments on non-user messages."""
+    with pytest.raises(ValueError, match="only valid on user messages"):
+        Message(
+            "assistant",
+            "Attached",
+            (Attachment("image.png", "image/png", b"image"),),
+        )
+
+
+async def test_completion_formats_builtin_tools(
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
+) -> None:
+    """Format provider-hosted tools for the SDK request."""
+    sdk.responses.create.return_value = MagicMock(output=[], output_text="Done")
+
+    await client.async_create_response(
+        "access-token",
+        model="grok-4.6",
+        input_data=[Message("user", "Search for this")],
+        tools=[
+            BuiltinTool("web_search"),
+            BuiltinTool("x_search"),
+            BuiltinTool("code_interpreter"),
+        ],
+    )
+
+    request: dict[str, Any] = sdk.responses.create.call_args.kwargs
+    assert request["tools"] == [
+        {"type": "web_search"},
+        {"type": "x_search"},
+        {"type": "code_interpreter"},
+    ]
 
 
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)

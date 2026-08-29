@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Add image and PDF attachments to user messages.
+- Add provider-hosted web search, X search, and code interpreter tools.
+
 ## 0.1.0
 
 - Publish as the explicitly unofficial `spacexai-subscription-client` distribution.
