@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from http import HTTPStatus
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 import openai
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout, FormData
@@ -54,6 +55,12 @@ from .const import (
     TTS_MIN_SPEED,
     TTS_URL,
     USERINFO_URL,
+    VIDEO_GENERATIONS_URL,
+    VIDEO_MAX_DURATION,
+    VIDEO_POLL_INTERVAL,
+    VIDEO_POLL_TIMEOUT,
+    VIDEO_REQUEST_TIMEOUT,
+    VIDEOS_URL,
 )
 from .errors import (
     AuthenticationError,
@@ -72,6 +79,7 @@ from .models import (
     Completion,
     DeviceAuthorization,
     GeneratedImage,
+    GeneratedVideo,
     InputItem,
     Message,
     OAuthToken,
@@ -83,6 +91,8 @@ from .models import (
 _TIMEOUT = ClientTimeout(total=HTTP_TIMEOUT)
 _MAX_EDIT_IMAGES = 5
 _WEBP_HEADER_SIZE = 12
+_VIDEO_ASPECT_RATIOS = frozenset({"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"})
+_VIDEO_RESOLUTIONS = frozenset({"480p", "720p", "1080p"})
 
 
 class SpaceXAISubscriptionClient:
@@ -342,6 +352,79 @@ class SpaceXAISubscriptionClient:
             raise ConnectionFailureError from err
         return payload
 
+    async def async_generate_video(  # noqa: PLR0913
+        self,
+        access_token: str,
+        *,
+        model: str,
+        prompt: str,
+        image_url: str | None = None,
+        duration: int | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
+    ) -> GeneratedVideo:
+        """Generate a video and wait for the deferred result."""
+        payload = await self._async_video_request(
+            access_token,
+            VIDEO_GENERATIONS_URL,
+            body=_format_video_request(
+                model, prompt, image_url, duration, aspect_ratio, resolution
+            ),
+        )
+        try:
+            request_id = _required_string(payload, "request_id")
+        except (KeyError, TypeError) as err:
+            raise InvalidResponseError from err
+        return await self._async_poll_video(access_token, request_id, model)
+
+    async def _async_poll_video(
+        self, access_token: str, request_id: str, requested_model: str
+    ) -> GeneratedVideo:
+        """Poll a deferred video request until it reaches a terminal state."""
+        try:
+            async with asyncio.timeout(VIDEO_POLL_TIMEOUT):
+                while True:
+                    payload = await self._async_video_request(
+                        access_token, f"{VIDEOS_URL}/{request_id}"
+                    )
+                    status = _video_status(payload)
+                    if status == "done":
+                        return _parse_generated_video(payload, requested_model)
+                    if status in ("failed", "expired"):
+                        raise SpaceXAISubscriptionError
+                    await asyncio.sleep(VIDEO_POLL_INTERVAL)
+        except TimeoutError as err:
+            raise RequestTimeoutError from err
+
+    async def _async_video_request(
+        self,
+        access_token: str,
+        url: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Request a video operation and return its JSON payload."""
+        try:
+            request = (
+                self._websession.post if body is not None else self._websession.get
+            )
+            kwargs: dict[str, Any] = {
+                "headers": {"Authorization": f"Bearer {access_token}"},
+                "timeout": ClientTimeout(total=VIDEO_REQUEST_TIMEOUT),
+            }
+            if body is not None:
+                kwargs["json"] = body
+            async with request(url, **kwargs) as response:
+                payload = await _async_json(response)
+                _raise_for_status(response.status, payload)
+        except SpaceXAISubscriptionError:
+            raise
+        except TimeoutError as err:
+            raise RequestTimeoutError from err
+        except ClientError as err:
+            raise ConnectionFailureError from err
+        return payload
+
     async def async_transcribe(
         self,
         access_token: str,
@@ -497,6 +580,58 @@ def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:
     return result
 
 
+def _format_video_request(  # noqa: PLR0913, PLR0917
+    model: str,
+    prompt: str,
+    image_url: str | None,
+    duration: int | None,
+    aspect_ratio: str | None,
+    resolution: str | None,
+) -> dict[str, Any]:
+    """Validate and format a video generation request."""
+    if not model or not prompt:
+        message = "Video model and prompt cannot be empty"
+        raise ValueError(message)
+    if image_url == "":
+        message = "Video input image URL cannot be empty"
+        raise ValueError(message)
+    if duration is not None and not 1 <= duration <= VIDEO_MAX_DURATION:
+        message = f"Video duration must be between 1 and {VIDEO_MAX_DURATION} seconds"
+        raise ValueError(message)
+    if aspect_ratio is not None and aspect_ratio not in _VIDEO_ASPECT_RATIOS:
+        message = f"Unsupported video aspect ratio: {aspect_ratio}"
+        raise ValueError(message)
+    if resolution is not None and resolution not in _VIDEO_RESOLUTIONS:
+        message = f"Unsupported video resolution: {resolution}"
+        raise ValueError(message)
+    body: dict[str, Any] = {"model": model, "prompt": prompt}
+    body.update(
+        {
+            key: value
+            for key, value in (
+                ("duration", duration),
+                ("aspect_ratio", aspect_ratio),
+                ("resolution", resolution),
+            )
+            if value is not None
+        }
+    )
+    if image_url is not None:
+        body["image"] = {"url": image_url}
+    return body
+
+
+def _video_status(payload: dict[str, Any]) -> str:
+    """Validate a deferred video status."""
+    try:
+        status = _required_string(payload, "status")
+    except (KeyError, TypeError) as err:
+        raise InvalidResponseError from err
+    if status not in ("pending", "done", "failed", "expired"):
+        raise InvalidResponseError
+    return status
+
+
 def _format_attachment(
     attachment: Attachment,
 ) -> ResponseInputImageParam | ResponseInputFileParam:
@@ -607,6 +742,32 @@ def _parse_generated_image(payload: object, model: str) -> GeneratedImage:
         model,
         revised_prompt,
     )
+
+
+def _parse_generated_video(payload: object, requested_model: str) -> GeneratedVideo:
+    """Validate and normalize a completed Imagine video response."""
+    if not isinstance(payload, Mapping):
+        raise InvalidResponseError
+    video = payload.get("video")
+    if not isinstance(video, Mapping):
+        raise InvalidResponseError
+    url = video.get("url")
+    duration = video.get("duration")
+    respect_moderation = video.get("respect_moderation")
+    model = payload.get("model", requested_model)
+    if (
+        not isinstance(url, str)
+        or urlsplit(url).scheme != "https"
+        or not urlsplit(url).netloc
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration <= 0
+        or not isinstance(respect_moderation, bool)
+        or not isinstance(model, str)
+        or not model
+    ):
+        raise InvalidResponseError
+    return GeneratedVideo(url, model, duration, respect_moderation)
 
 
 def _image_media_type(data: bytes, provider_type: object) -> str:

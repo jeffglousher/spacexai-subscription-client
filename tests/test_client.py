@@ -21,6 +21,7 @@ from spacexai_subscription_client import (
     DeviceAuthorization,
     DeviceAuthorizationExpiredError,
     GeneratedImage,
+    GeneratedVideo,
     InvalidResponseError,
     Message,
     RateLimitError,
@@ -47,6 +48,9 @@ from spacexai_subscription_client.const import (
     SPEECH_TIMEOUT,
     STT_URL,
     TTS_URL,
+    VIDEO_GENERATIONS_URL,
+    VIDEO_REQUEST_TIMEOUT,
+    VIDEOS_URL,
 )
 
 
@@ -508,8 +512,8 @@ async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> Non
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
     assert sdk.constructor.call_args.kwargs["default_headers"] == {
         **GROK_CLI_REQUEST_HEADERS,
-        "User-Agent": "spacexai-subscription-client/0.4.0",
-        "x-grok-client-version": "0.4.0",
+        "User-Agent": "spacexai-subscription-client/0.5.0",
+        "x-grok-client-version": "0.5.0",
     }
 
 
@@ -1383,4 +1387,226 @@ async def test_synthesize_speech_oversized_response(
     ):
         await client.async_synthesize_speech(
             "access-token", text="Hello", voice_id="eve", language="en"
+        )
+
+
+async def test_generate_video(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Start, poll, and normalize a deferred video generation."""
+    websession.post.return_value = MockResponse(200, {"request_id": "request-1"})
+    websession.get.side_effect = [
+        MockResponse(200, {"status": "pending"}),
+        MockResponse(
+            200,
+            {
+                "status": "done",
+                "video": {
+                    "url": "https://vidgen.x.ai/video.mp4",
+                    "duration": 8,
+                    "respect_moderation": True,
+                },
+                "model": "grok-imagine-video-1.5",
+            },
+        ),
+    ]
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new=AsyncMock()
+    ) as sleep:
+        result = await client.async_generate_video(
+            "access-token",
+            model="grok-imagine-video-1.5",
+            prompt="A calm lake at sunrise",
+            image_url="data:image/jpeg;base64,aW1hZ2U=",
+            duration=8,
+            aspect_ratio="16:9",
+            resolution="1080p",
+        )
+
+    assert result == GeneratedVideo(
+        url="https://vidgen.x.ai/video.mp4",
+        model="grok-imagine-video-1.5",
+        duration=8,
+        respect_moderation=True,
+    )
+    request = websession.post.call_args
+    assert request.args == (VIDEO_GENERATIONS_URL,)
+    assert request.kwargs["headers"] == {"Authorization": "Bearer access-token"}
+    assert request.kwargs["timeout"].total == VIDEO_REQUEST_TIMEOUT
+    assert request.kwargs["json"] == {
+        "model": "grok-imagine-video-1.5",
+        "prompt": "A calm lake at sunrise",
+        "image": {"url": "data:image/jpeg;base64,aW1hZ2U="},
+        "duration": 8,
+        "aspect_ratio": "16:9",
+        "resolution": "1080p",
+    }
+    assert [call.args for call in websession.get.call_args_list] == [
+        (f"{VIDEOS_URL}/request-1",),
+        (f"{VIDEOS_URL}/request-1",),
+    ]
+    sleep.assert_awaited_once()
+
+
+async def test_generate_video_uses_only_required_fields(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Omit unset optional video generation fields."""
+    websession.post.return_value = MockResponse(200, {"request_id": "request-1"})
+    websession.get.return_value = MockResponse(
+        200,
+        {
+            "status": "done",
+            "video": {
+                "url": "https://vidgen.x.ai/video.mp4",
+                "duration": 5,
+                "respect_moderation": True,
+            },
+        },
+    )
+
+    result = await client.async_generate_video(
+        "access-token", model="video-model", prompt="A red ball"
+    )
+
+    assert result.model == "video-model"
+    assert websession.post.call_args.kwargs["json"] == {
+        "model": "video-model",
+        "prompt": "A red ball",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        pytest.param({"model": ""}, "model", id="model"),
+        pytest.param({"prompt": ""}, "prompt", id="prompt"),
+        pytest.param({"image_url": ""}, "image URL", id="image_url"),
+        pytest.param({"duration": 0}, "between 1 and 15", id="short"),
+        pytest.param({"duration": 16}, "between 1 and 15", id="long"),
+        pytest.param({"aspect_ratio": "2:1"}, "aspect ratio", id="ratio"),
+        pytest.param({"resolution": "4k"}, "resolution", id="resolution"),
+    ],
+)
+async def test_generate_video_validation(
+    client: SpaceXAISubscriptionClient,
+    kwargs: dict[str, Any],
+    match: str,
+    websession: MagicMock,
+) -> None:
+    """Validate video generation inputs before making a request."""
+    arguments: dict[str, Any] = {
+        "model": "video-model",
+        "prompt": "A red ball",
+        **kwargs,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        await client.async_generate_video("access-token", **arguments)
+
+    websession.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_error"),
+    [
+        pytest.param({}, InvalidResponseError, id="missing_request_id"),
+        pytest.param({"request_id": ""}, InvalidResponseError, id="empty_request_id"),
+    ],
+)
+async def test_generate_video_rejects_invalid_start(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    payload: object,
+    websession: MagicMock,
+) -> None:
+    """Reject malformed video generation start responses."""
+    websession.post.return_value = MockResponse(200, payload)
+
+    with pytest.raises(expected_error):
+        await client.async_generate_video(
+            "access-token", model="video-model", prompt="A red ball"
+        )
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_error"),
+    [
+        pytest.param({"status": "failed"}, SpaceXAISubscriptionError, id="failed"),
+        pytest.param({"status": "expired"}, SpaceXAISubscriptionError, id="expired"),
+        pytest.param({"status": "queued"}, InvalidResponseError, id="unknown_status"),
+        pytest.param({}, InvalidResponseError, id="missing_status"),
+        pytest.param(
+            {
+                "status": "done",
+                "video": {
+                    "url": "http://vidgen.x.ai/video.mp4",
+                    "duration": 5,
+                    "respect_moderation": True,
+                },
+            },
+            InvalidResponseError,
+            id="insecure_url",
+        ),
+        pytest.param(
+            {
+                "status": "done",
+                "video": {
+                    "url": "https://vidgen.x.ai/video.mp4",
+                    "duration": True,
+                    "respect_moderation": True,
+                },
+            },
+            InvalidResponseError,
+            id="boolean_duration",
+        ),
+    ],
+)
+async def test_generate_video_rejects_failed_or_invalid_result(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    payload: object,
+    websession: MagicMock,
+) -> None:
+    """Reject failed and malformed deferred video results."""
+    websession.post.return_value = MockResponse(200, {"request_id": "request-1"})
+    websession.get.return_value = MockResponse(200, payload)
+
+    with pytest.raises(expected_error):
+        await client.async_generate_video(
+            "access-token", model="video-model", prompt="A red ball"
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "side_effect", "expected_error"),
+    [
+        pytest.param("post", TimeoutError(), RequestTimeoutError, id="start_timeout"),
+        pytest.param(
+            "post", ClientError(), ConnectionFailureError, id="start_connection"
+        ),
+        pytest.param("get", TimeoutError(), RequestTimeoutError, id="poll_timeout"),
+        pytest.param(
+            "get", ClientError(), ConnectionFailureError, id="poll_connection"
+        ),
+    ],
+)
+async def test_generate_video_transport_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    method: str,
+    side_effect: Exception,
+    websession: MagicMock,
+) -> None:
+    """Translate video generation transport failures."""
+    if method == "post":
+        websession.post.side_effect = side_effect
+    else:
+        websession.post.return_value = MockResponse(200, {"request_id": "request-1"})
+        websession.get.side_effect = side_effect
+
+    with pytest.raises(expected_error):
+        await client.async_generate_video(
+            "access-token", model="video-model", prompt="A red ball"
         )

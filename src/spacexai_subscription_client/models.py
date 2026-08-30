@@ -134,6 +134,16 @@ class GeneratedImage:
     revised_prompt: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class GeneratedVideo:
+    """Video returned by the SpaceXAI Imagine API."""
+
+    url: str
+    model: str
+    duration: int
+    respect_moderation: bool
+
+
 type InputItem = Message | ToolCall | ToolResult
 type ResponseTool = Tool | BuiltinTool
 

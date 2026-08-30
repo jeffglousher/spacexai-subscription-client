@@ -72,6 +72,10 @@ Model discovery and response generation use explicit timeouts. SDK retries are
 disabled so callers receive a single stable failure and can apply their own
 retry policy without duplicating a response request.
 
+Video generation follows the provider's deferred start-and-poll contract with
+bounded request and overall polling timeouts. Completed videos expose their
+temporary HTTPS URL and metadata so the host can persist the media promptly.
+
 The OAuth client identity and provider endpoints are centralized in
 `spacexai_subscription_client.const` so an upstream identity decision can be
 adopted without changing the public client API.

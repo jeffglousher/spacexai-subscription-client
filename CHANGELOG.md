@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+- Add bounded deferred video generation with text and optional image input.
+
 ## 0.4.0
 
 - Add batch speech transcription.
