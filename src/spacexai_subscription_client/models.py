@@ -1,4 +1,4 @@
-"""Data models exposed by the SpaceXAI client."""
+"""Data models exposed by the Grok subscription client."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ class OAuthToken:
 
 @dataclass(frozen=True, slots=True)
 class Account:
-    """Authenticated SpaceXAI account identity."""
+    """Authenticated Grok account identity."""
 
     subject: str
     name: str | None
@@ -49,7 +49,7 @@ class Account:
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """Conversation message sent to SpaceXAI."""
+    """Conversation message sent to Grok."""
 
     role: Literal["user", "assistant", "developer"]
     content: str
@@ -94,7 +94,7 @@ type InputItem = Message | ToolCall | ToolResult
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """Normalized SpaceXAI completion."""
+    """Normalized Grok completion."""
 
     text: str
     tool_calls: tuple[ToolCall, ...]

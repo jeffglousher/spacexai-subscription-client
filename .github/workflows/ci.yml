@@ -29,11 +29,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           version: "0.12.7"
-      - run: uv venv
-      - run: >-
-          uv pip install -e .
-          pytest pytest-asyncio pytest-cov ruff mypy
+      - run: uv sync --locked
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
-      - run: uv run --no-sync mypy --strict src/spacexai_client
-      - run: uv run --no-sync pytest --cov=spacexai_client --cov-fail-under=95
+      - run: uv run --no-sync mypy --strict src/spacexai_subscription_client
+      - run: uv run --no-sync pytest --cov=spacexai_subscription_client --cov-fail-under=95

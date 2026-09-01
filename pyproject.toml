@@ -3,14 +3,15 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "spacexai-client"
+name = "spacexai-subscription-client"
 version = "0.1.0"
-description = "Async Python client for SpaceXAI OAuth and Grok subscription APIs"
+description = "Unofficial async Python client for SpaceXAI OAuth subscription APIs"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Jeff Glousher" }]
+keywords = ["grok", "home-assistant", "oauth", "xai"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Framework :: AsyncIO",
@@ -27,12 +28,25 @@ dependencies = [
   "openai==2.45.0",
 ]
 
+[dependency-groups]
+dev = [
+  "mypy==2.3.1",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "ruff==0.16.5",
+]
+
 [project.urls]
-Changelog = "https://github.com/jeffglousher/spacexai-client/blob/main/CHANGELOG.md"
-Repository = "https://github.com/jeffglousher/spacexai-client"
+Changelog = "https://github.com/jeffglousher/spacexai-subscription-client/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jeffglousher/spacexai-subscription-client/issues"
+Repository = "https://github.com/jeffglousher/spacexai-subscription-client"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/spacexai_client"]
+packages = ["src/spacexai_subscription_client"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.coverage", "/.uv-cache", "/.venv", "/dist"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

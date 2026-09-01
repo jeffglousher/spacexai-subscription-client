@@ -1,4 +1,4 @@
-"""Async SpaceXAI client."""
+"""Async client for SpaceXAI OAuth subscription APIs."""
 
 import asyncio
 import json
@@ -22,12 +22,16 @@ from openai.types.responses.response_input_param import FunctionCallOutput
 from .const import (
     API_BASE_URL,
     DEVICE_CODE_GRANT,
-    DEVICE_CODE_MAX_POLL_SECONDS,
     DEVICE_CODE_URL,
     GROK_CLI_OAUTH_CLIENT_ID,
     GROK_CLI_REQUEST_HEADERS,
+    GROK_OAUTH_REQUEST_HEADERS,
     HTTP_TIMEOUT,
+    MODEL_CATALOG_TIMEOUT,
+    OAUTH_REFERRER,
     OAUTH_SCOPES,
+    RESPONSE_TIMEOUT,
+    SDK_MAX_RETRIES,
     TOKEN_URL,
     USERINFO_URL,
 )
@@ -35,10 +39,11 @@ from .errors import (
     AuthenticationError,
     AuthorizationDeniedError,
     ConnectionFailureError,
+    DeviceAuthorizationExpiredError,
     InvalidResponseError,
     RateLimitError,
     RequestTimeoutError,
-    SpaceXAIError,
+    SpaceXAISubscriptionError,
 )
 from .models import (
     Account,
@@ -54,14 +59,13 @@ from .models import (
 _TIMEOUT = ClientTimeout(total=HTTP_TIMEOUT)
 
 
-class SpaceXAIClient:
-    """Access SpaceXAI OAuth and Grok subscription endpoints."""
+class SpaceXAISubscriptionClient:
+    """Access SpaceXAI OAuth and subscription endpoints."""
 
     def __init__(self, websession: ClientSession, http_client: HttpxClient) -> None:
         """Initialize the client with caller-owned HTTP sessions."""
         self._websession = websession
         self._http_client = http_client
-        self._sdk_client: openai.AsyncOpenAI | None = None
 
     async def async_request_device_authorization(self) -> DeviceAuthorization:
         """Start OAuth device authorization."""
@@ -70,13 +74,15 @@ class SpaceXAIClient:
                 DEVICE_CODE_URL,
                 data={
                     "client_id": GROK_CLI_OAUTH_CLIENT_ID,
+                    "referrer": OAUTH_REFERRER,
                     "scope": " ".join(OAUTH_SCOPES),
                 },
+                headers=GROK_OAUTH_REQUEST_HEADERS,
                 timeout=_TIMEOUT,
             ) as response:
                 payload = await _async_json(response)
                 _raise_for_status(response.status, payload)
-        except SpaceXAIError:
+        except SpaceXAISubscriptionError:
             raise
         except TimeoutError as err:
             raise RequestTimeoutError from err
@@ -113,12 +119,13 @@ class SpaceXAIClient:
         self, authorization: DeviceAuthorization
     ) -> OAuthToken:
         """Poll until the user approves device authorization."""
-        deadline = time.monotonic() + min(
-            authorization.expires_in, DEVICE_CODE_MAX_POLL_SECONDS
-        )
+        deadline = time.monotonic() + authorization.expires_in
         interval = authorization.interval
 
-        while time.monotonic() < deadline:
+        while True:
+            await asyncio.sleep(interval)
+            if time.monotonic() > deadline:
+                raise DeviceAuthorizationExpiredError
             try:
                 async with self._websession.post(
                     TOKEN_URL,
@@ -127,6 +134,7 @@ class SpaceXAIClient:
                         "client_id": GROK_CLI_OAUTH_CLIENT_ID,
                         "device_code": authorization.device_code,
                     },
+                    headers=GROK_OAUTH_REQUEST_HEADERS,
                     timeout=_TIMEOUT,
                 ) as response:
                     payload = await _async_json(response)
@@ -140,21 +148,7 @@ class SpaceXAIClient:
             if response.status == HTTPStatus.OK:
                 return _oauth_token(payload)
 
-            error = payload.get("error")
-            if error == "authorization_pending":
-                await asyncio.sleep(interval)
-                continue
-            if error == "slow_down":
-                interval = min(interval + 5, 30)
-                await asyncio.sleep(interval)
-                continue
-            if error in ("access_denied", "authorization_denied"):
-                raise AuthorizationDeniedError
-            if error == "expired_token":
-                raise RequestTimeoutError
-            _raise_for_status(response.status, payload)
-
-        raise RequestTimeoutError
+            interval = _next_poll_interval(response.status, payload, interval)
 
     async def async_get_account(self, access_token: str) -> Account:
         """Return the authenticated account identity."""
@@ -166,7 +160,7 @@ class SpaceXAIClient:
             ) as response:
                 payload = await _async_json(response)
                 _raise_for_status(response.status, payload)
-        except SpaceXAIError:
+        except SpaceXAISubscriptionError:
             raise
         except TimeoutError as err:
             raise RequestTimeoutError from err
@@ -188,7 +182,9 @@ class SpaceXAIClient:
     async def async_list_models(self, access_token: str) -> tuple[str, ...]:
         """Return model identifiers available to the OAuth account."""
         try:
-            models = await self._sdk(access_token).models.list(timeout=10.0)
+            models = await self._sdk(access_token).models.list(
+                timeout=MODEL_CATALOG_TIMEOUT
+            )
         except openai.AuthenticationError as err:
             raise AuthenticationError from err
         except openai.APITimeoutError as err:
@@ -198,7 +194,7 @@ class SpaceXAIClient:
         except openai.RateLimitError as err:
             raise RateLimitError from err
         except openai.OpenAIError as err:
-            raise SpaceXAIError from err
+            raise SpaceXAISubscriptionError from err
         try:
             model_ids = tuple(model.id for model in models.data)
         except (AttributeError, TypeError) as err:
@@ -232,6 +228,7 @@ class SpaceXAIClient:
                 ],
                 parallel_tool_calls=False,
                 extra_headers={"x-grok-model-override": model},
+                timeout=RESPONSE_TIMEOUT,
             )
         except openai.AuthenticationError as err:
             raise AuthenticationError from err
@@ -242,7 +239,7 @@ class SpaceXAIClient:
         except openai.RateLimitError as err:
             raise RateLimitError from err
         except openai.OpenAIError as err:
-            raise SpaceXAIError from err
+            raise SpaceXAISubscriptionError from err
         tool_calls = tuple(
             _parse_tool_call(item)
             for item in response.output
@@ -253,17 +250,14 @@ class SpaceXAIClient:
         return Completion(response.output_text or "", tool_calls)
 
     def _sdk(self, access_token: str) -> openai.AsyncOpenAI:
-        """Return the shared SDK client with the current access token."""
-        if self._sdk_client is None:
-            self._sdk_client = openai.AsyncOpenAI(
-                api_key=access_token,
-                base_url=API_BASE_URL,
-                default_headers=GROK_CLI_REQUEST_HEADERS,
-                http_client=self._http_client,
-            )
-        else:
-            self._sdk_client.api_key = access_token
-        return self._sdk_client
+        """Return a request-scoped SDK client with the current access token."""
+        return openai.AsyncOpenAI(
+            api_key=access_token,
+            base_url=API_BASE_URL,
+            default_headers=GROK_CLI_REQUEST_HEADERS,
+            http_client=self._http_client,
+            max_retries=SDK_MAX_RETRIES,
+        )
 
 
 def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:
@@ -300,6 +294,8 @@ def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:
 
 def _parse_tool_call(item: ResponseFunctionToolCall) -> ToolCall:
     """Convert and validate an SDK tool call."""
+    if not item.call_id or not item.name:
+        raise InvalidResponseError
     try:
         arguments = json.loads(item.arguments)
     except ValueError as err:
@@ -314,8 +310,10 @@ async def _async_json(response: ClientResponse) -> dict[str, Any]:
     try:
         payload = await response.json(content_type=None)
     except ValueError as err:
+        _raise_for_status(response.status, {})
         raise InvalidResponseError from err
     if not isinstance(payload, dict):
+        _raise_for_status(response.status, {})
         raise InvalidResponseError
     return payload
 
@@ -349,6 +347,21 @@ def _oauth_token(payload: dict[str, Any]) -> OAuthToken:
     return OAuthToken(token)
 
 
+def _next_poll_interval(status: int, payload: dict[str, Any], interval: int) -> int:
+    """Handle a device-token polling response and return the next interval."""
+    error = payload.get("error")
+    if error == "authorization_pending":
+        return interval
+    if error == "slow_down":
+        return min(interval + 5, 30)
+    if error in ("access_denied", "authorization_denied"):
+        raise AuthorizationDeniedError
+    if error == "expired_token":
+        raise DeviceAuthorizationExpiredError
+    _raise_for_status(status, payload)
+    return interval
+
+
 def _raise_for_status(status: int, payload: dict[str, Any]) -> None:
     """Translate an HTTP status into a stable client exception."""
     if status < HTTPStatus.BAD_REQUEST:
@@ -367,4 +380,4 @@ def _raise_for_status(status: int, payload: dict[str, Any]) -> None:
         raise RateLimitError
     if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
         raise ConnectionFailureError
-    raise SpaceXAIError
+    raise SpaceXAISubscriptionError

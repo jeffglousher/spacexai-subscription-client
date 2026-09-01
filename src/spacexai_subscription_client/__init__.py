@@ -1,14 +1,15 @@
-"""Async client for SpaceXAI OAuth and Grok subscription APIs."""
+"""Unofficial async client for SpaceXAI OAuth subscription APIs."""
 
-from .client import SpaceXAIClient
+from .client import SpaceXAISubscriptionClient
 from .errors import (
     AuthenticationError,
     AuthorizationDeniedError,
     ConnectionFailureError,
+    DeviceAuthorizationExpiredError,
     InvalidResponseError,
     RateLimitError,
     RequestTimeoutError,
-    SpaceXAIError,
+    SpaceXAISubscriptionError,
 )
 from .models import (
     Account,
@@ -29,14 +30,15 @@ __all__ = [
     "Completion",
     "ConnectionFailureError",
     "DeviceAuthorization",
+    "DeviceAuthorizationExpiredError",
     "InputItem",
     "InvalidResponseError",
     "Message",
     "OAuthToken",
     "RateLimitError",
     "RequestTimeoutError",
-    "SpaceXAIClient",
-    "SpaceXAIError",
+    "SpaceXAISubscriptionClient",
+    "SpaceXAISubscriptionError",
     "Tool",
     "ToolCall",
     "ToolResult",
