@@ -1670,3 +1670,52 @@ async def test_generate_video_transport_error(
         await client.async_generate_video(
             "access-token", model="video-model", prompt="A red ball"
         )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [
+        pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(403, PermissionDeniedError, id="permission_denied"),
+        pytest.param(429, RateLimitError, id="rate_limit"),
+        pytest.param(500, ConnectionFailureError, id="server"),
+    ],
+)
+async def test_generate_video_start_http_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Translate video-generation start HTTP failures."""
+    websession.post.return_value = MockResponse(status, {"error": "failed"})
+
+    with pytest.raises(expected_error):
+        await client.async_generate_video(
+            "access-token", model="video-model", prompt="A red ball"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [
+        pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(403, PermissionDeniedError, id="permission_denied"),
+        pytest.param(429, RateLimitError, id="rate_limit"),
+        pytest.param(500, ConnectionFailureError, id="server"),
+    ],
+)
+async def test_generate_video_poll_http_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Translate deferred video polling HTTP failures."""
+    websession.post.return_value = MockResponse(200, {"request_id": "request-1"})
+    websession.get.return_value = MockResponse(status, {"error": "failed"})
+
+    with pytest.raises(expected_error):
+        await client.async_generate_video(
+            "access-token", model="video-model", prompt="A red ball"
+        )
