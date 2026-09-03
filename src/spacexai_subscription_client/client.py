@@ -53,6 +53,7 @@ from .errors import (
     ConnectionFailureError,
     DeviceAuthorizationExpiredError,
     InvalidResponseError,
+    PermissionDeniedError,
     RateLimitError,
     RequestTimeoutError,
     SpaceXAISubscriptionError,
@@ -131,18 +132,18 @@ class SpaceXAISubscriptionClient:
             verification_uri_complete=verification_uri_complete,
             expires_in=expires_in,
             interval=interval,
+            expires_at_monotonic=time.monotonic() + expires_in,
         )
 
     async def async_poll_device_token(
         self, authorization: DeviceAuthorization
     ) -> OAuthToken:
         """Poll until the user approves device authorization."""
-        deadline = time.monotonic() + authorization.expires_in
         interval = authorization.interval
 
         while True:
             await asyncio.sleep(interval)
-            if time.monotonic() > deadline:
+            if time.monotonic() >= authorization.expires_at_monotonic:
                 raise DeviceAuthorizationExpiredError
             try:
                 async with self._websession.post(
@@ -205,6 +206,8 @@ class SpaceXAISubscriptionClient:
             )
         except openai.AuthenticationError as err:
             raise AuthenticationError from err
+        except openai.PermissionDeniedError as err:
+            raise PermissionDeniedError from err
         except openai.APITimeoutError as err:
             raise RequestTimeoutError from err
         except openai.APIConnectionError as err:
@@ -243,6 +246,8 @@ class SpaceXAISubscriptionClient:
             )
         except openai.AuthenticationError as err:
             raise AuthenticationError from err
+        except openai.PermissionDeniedError as err:
+            raise PermissionDeniedError from err
         except openai.APITimeoutError as err:
             raise RequestTimeoutError from err
         except openai.APIConnectionError as err:
@@ -584,14 +589,14 @@ def _raise_for_status(status: int, payload: dict[str, Any]) -> None:
     """Translate an HTTP status into a stable client exception."""
     if status < HTTPStatus.BAD_REQUEST:
         return
-    if status in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN) or payload.get(
-        "error"
-    ) in (
+    if status == HTTPStatus.UNAUTHORIZED or payload.get("error") in (
         "invalid_client",
         "invalid_token",
         "unauthorized_client",
     ):
         raise AuthenticationError
+    if status == HTTPStatus.FORBIDDEN:
+        raise PermissionDeniedError
     if status == HTTPStatus.REQUEST_TIMEOUT:
         raise RequestTimeoutError
     if status == HTTPStatus.TOO_MANY_REQUESTS:
