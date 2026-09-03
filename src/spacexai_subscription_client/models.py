@@ -1,7 +1,7 @@
 """Data models exposed by the Grok subscription client."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -16,6 +16,7 @@ class DeviceAuthorization:
     verification_uri_complete: str
     expires_in: int
     interval: int
+    expires_at_monotonic: float = field(compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
