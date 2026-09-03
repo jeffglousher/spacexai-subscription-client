@@ -1,6 +1,7 @@
 """Tests for the public Grok subscription client."""
 
 import base64
+import time
 from collections.abc import Generator
 from typing import Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
@@ -24,6 +25,7 @@ from spacexai_subscription_client import (
     GeneratedVideo,
     InvalidResponseError,
     Message,
+    PermissionDeniedError,
     RateLimitError,
     RequestTimeoutError,
     ResponseFormat,
@@ -92,12 +94,21 @@ def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
         "https://auth.x.ai/device",
         expires_in,
         1,
+        time.monotonic() + expires_in,
     )
 
 
 _REQUEST = Request("POST", "https://api.example.test")
 _RESPONSE = Response(401, request=_REQUEST)
+_FORBIDDEN_RESPONSE = Response(403, request=_REQUEST)
 SDK_ERRORS = (
+    pytest.param(
+        openai.PermissionDeniedError(
+            "forbidden", response=_FORBIDDEN_RESPONSE, body=None
+        ),
+        PermissionDeniedError,
+        id="permission_denied",
+    ),
     pytest.param(
         openai.AuthenticationError("rejected", response=_RESPONSE, body=None),
         AuthenticationError,
@@ -294,16 +305,20 @@ async def test_device_token_uses_server_expiry(
         ),
     ]
 
+    authorization = _authorization(expires_in=1800)
     with (
         patch(
             "spacexai_subscription_client.client.time.monotonic",
-            side_effect=[0, 901, 902],
+            side_effect=[
+                authorization.expires_at_monotonic - 899,
+                authorization.expires_at_monotonic - 898,
+            ],
         ),
         patch(
             "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
         ),
     ):
-        token = await client.async_poll_device_token(_authorization(expires_in=1800))
+        token = await client.async_poll_device_token(authorization)
 
     assert token.data["access_token"] == "access-token"
     assert websession.post.call_count == 2
@@ -388,6 +403,33 @@ async def test_device_token_deadline(
     websession.post.assert_not_called()
 
 
+async def test_device_token_deadline_is_not_reset_between_poll_attempts(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Keep the original device-code deadline after a transient poll failure."""
+    authorization = _authorization(expires_in=1800)
+    websession.post.side_effect = ClientError
+
+    with (
+        patch(
+            "spacexai_subscription_client.client.time.monotonic",
+            side_effect=[
+                authorization.expires_at_monotonic - 1,
+                authorization.expires_at_monotonic,
+            ],
+        ),
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+    ):
+        with pytest.raises(ConnectionFailureError):
+            await client.async_poll_device_token(authorization)
+        with pytest.raises(DeviceAuthorizationExpiredError):
+            await client.async_poll_device_token(authorization)
+
+    assert websession.post.call_count == 1
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -428,6 +470,7 @@ async def test_account_authentication_error(
     ("status", "expected_error"),
     [
         pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(403, PermissionDeniedError, id="permission_denied"),
         pytest.param(429, RateLimitError, id="rate_limit"),
         pytest.param(500, ConnectionFailureError, id="server"),
     ],
@@ -920,6 +963,7 @@ async def test_generate_image_transport_error(
     ("status", "expected_error"),
     [
         pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(403, PermissionDeniedError, id="permission_denied"),
         pytest.param(429, RateLimitError, id="rate_limit"),
         pytest.param(500, ConnectionFailureError, id="server"),
     ],
@@ -1170,25 +1214,33 @@ async def test_transcribe_without_language(
 
 
 @pytest.mark.parametrize(
-    ("payload", "status"),
+    ("payload", "status", "expected_error"),
     [
-        pytest.param({}, 200, id="missing_text"),
-        pytest.param({"text": ""}, 200, id="empty_text"),
-        pytest.param(ValueError(), 200, id="invalid_json"),
-        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+        pytest.param({}, 200, InvalidResponseError, id="missing_text"),
+        pytest.param({"text": ""}, 200, InvalidResponseError, id="empty_text"),
+        pytest.param(ValueError(), 200, InvalidResponseError, id="invalid_json"),
+        pytest.param(
+            {"error": "invalid_token"}, 401, AuthenticationError, id="authentication"
+        ),
+        pytest.param(
+            {"error": "forbidden"},
+            403,
+            PermissionDeniedError,
+            id="permission_denied",
+        ),
     ],
 )
 async def test_transcribe_error(
     client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     payload: object,
     status: int,
     websession: MagicMock,
 ) -> None:
     """Reject malformed and failed transcription responses."""
     websession.post.return_value = MockResponse(status, payload)
-    expected = AuthenticationError if status == 401 else InvalidResponseError
 
-    with pytest.raises(expected):
+    with pytest.raises(expected_error):
         await client.async_transcribe(
             "access-token",
             audio=b"audio",
@@ -1353,23 +1405,31 @@ async def test_synthesize_speech_transport_error(
 
 
 @pytest.mark.parametrize(
-    ("payload", "status"),
+    ("payload", "status", "expected_error"),
     [
-        pytest.param(b"", 200, id="empty_audio"),
-        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+        pytest.param(b"", 200, InvalidResponseError, id="empty_audio"),
+        pytest.param(
+            {"error": "invalid_token"}, 401, AuthenticationError, id="authentication"
+        ),
+        pytest.param(
+            {"error": "forbidden"},
+            403,
+            PermissionDeniedError,
+            id="permission_denied",
+        ),
     ],
 )
 async def test_synthesize_speech_error(
     client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     payload: object,
     status: int,
     websession: MagicMock,
 ) -> None:
     """Reject empty audio and failed synthesis responses."""
     websession.post.return_value = MockResponse(status, payload)
-    expected = AuthenticationError if status == 401 else InvalidResponseError
 
-    with pytest.raises(expected):
+    with pytest.raises(expected_error):
         await client.async_synthesize_speech(
             "access-token", text="Hello", voice_id="eve", language="en"
         )
