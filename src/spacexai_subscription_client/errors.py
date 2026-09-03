@@ -9,6 +9,10 @@ class AuthenticationError(SpaceXAISubscriptionError):
     """SpaceXAI rejected the current access token or OAuth client."""
 
 
+class PermissionDeniedError(SpaceXAISubscriptionError):
+    """The authenticated account is not permitted to access the resource."""
+
+
 class AuthorizationDeniedError(AuthenticationError):
     """The user denied device authorization."""
 
