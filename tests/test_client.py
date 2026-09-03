@@ -1210,25 +1210,33 @@ async def test_transcribe_without_language(
 
 
 @pytest.mark.parametrize(
-    ("payload", "status"),
+    ("payload", "status", "expected_error"),
     [
-        pytest.param({}, 200, id="missing_text"),
-        pytest.param({"text": ""}, 200, id="empty_text"),
-        pytest.param(ValueError(), 200, id="invalid_json"),
-        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+        pytest.param({}, 200, InvalidResponseError, id="missing_text"),
+        pytest.param({"text": ""}, 200, InvalidResponseError, id="empty_text"),
+        pytest.param(ValueError(), 200, InvalidResponseError, id="invalid_json"),
+        pytest.param(
+            {"error": "invalid_token"}, 401, AuthenticationError, id="authentication"
+        ),
+        pytest.param(
+            {"error": "forbidden"},
+            403,
+            PermissionDeniedError,
+            id="permission_denied",
+        ),
     ],
 )
 async def test_transcribe_error(
     client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     payload: object,
     status: int,
     websession: MagicMock,
 ) -> None:
     """Reject malformed and failed transcription responses."""
     websession.post.return_value = MockResponse(status, payload)
-    expected = AuthenticationError if status == 401 else InvalidResponseError
 
-    with pytest.raises(expected):
+    with pytest.raises(expected_error):
         await client.async_transcribe(
             "access-token",
             audio=b"audio",
@@ -1393,23 +1401,31 @@ async def test_synthesize_speech_transport_error(
 
 
 @pytest.mark.parametrize(
-    ("payload", "status"),
+    ("payload", "status", "expected_error"),
     [
-        pytest.param(b"", 200, id="empty_audio"),
-        pytest.param({"error": "invalid_token"}, 401, id="authentication"),
+        pytest.param(b"", 200, InvalidResponseError, id="empty_audio"),
+        pytest.param(
+            {"error": "invalid_token"}, 401, AuthenticationError, id="authentication"
+        ),
+        pytest.param(
+            {"error": "forbidden"},
+            403,
+            PermissionDeniedError,
+            id="permission_denied",
+        ),
     ],
 )
 async def test_synthesize_speech_error(
     client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     payload: object,
     status: int,
     websession: MagicMock,
 ) -> None:
     """Reject empty audio and failed synthesis responses."""
     websession.post.return_value = MockResponse(status, payload)
-    expected = AuthenticationError if status == 401 else InvalidResponseError
 
-    with pytest.raises(expected):
+    with pytest.raises(expected_error):
         await client.async_synthesize_speech(
             "access-token", text="Hello", voice_id="eve", language="en"
         )
