@@ -1,14 +1,15 @@
 """Tests for the public Grok subscription client."""
 
+import asyncio
 import base64
 import time
-from collections.abc import Generator
+from collections.abc import AsyncIterator, Generator
 from typing import Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import openai
 import pytest
-from aiohttp import ClientError
+from aiohttp import ClientError, StreamReader
 from httpx import Request, Response
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -74,11 +75,12 @@ class MockResponse:
             raise self._payload
         return self._payload
 
-    async def read(self, size: int = -1) -> bytes:
-        """Return the configured byte payload."""
+    async def iter_chunked(self, size: int) -> AsyncIterator[bytes]:
+        """Stream the configured byte payload."""
         if not isinstance(self._payload, bytes):
             raise TypeError
-        return self._payload[:size]
+        for offset in range(0, len(self._payload), size):
+            yield self._payload[offset : offset + size]
 
 
 def _authorization(*, expires_in: int = 1800, interval: int = 1) -> DeviceAuthorization:
@@ -1414,6 +1416,72 @@ async def test_synthesize_speech(
         "speed": 1.1,
         "output_format": {"codec": "wav"},
     }
+
+
+async def test_synthesize_speech_waits_for_complete_stream(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Do not return the first audio chunk before the response ends."""
+    response = MockResponse(200, b"")
+    response.content = StreamReader(MagicMock(_reading_paused=False), limit=65536)
+    response.content.feed_data(b"first")
+    loop = asyncio.get_running_loop()
+    loop.call_soon(response.content.feed_data, b"second")
+    loop.call_soon(response.content.feed_eof)
+    websession.post.return_value = response
+
+    audio = await client.async_synthesize_speech(
+        "access-token", text="Welcome home", voice_id="eve", language="en"
+    )
+
+    assert audio == b"firstsecond"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_error"),
+    [
+        pytest.param(TimeoutError(), RequestTimeoutError, id="timeout"),
+        pytest.param(ClientError(), ConnectionFailureError, id="connection"),
+    ],
+)
+async def test_synthesize_speech_rejects_interrupted_stream(
+    client: SpaceXAISubscriptionClient,
+    error: Exception,
+    expected_error: type[SpaceXAISubscriptionError],
+    websession: MagicMock,
+) -> None:
+    """Do not return partial audio when a later network read fails."""
+    response = MockResponse(200, b"")
+    response.content = StreamReader(MagicMock(_reading_paused=False), limit=65536)
+    response.content.feed_data(b"first")
+    asyncio.get_running_loop().call_soon(response.content.set_exception, error)
+    websession.post.return_value = response
+
+    with pytest.raises(expected_error):
+        await client.async_synthesize_speech(
+            "access-token", text="Welcome home", voice_id="eve", language="en"
+        )
+
+
+async def test_synthesize_speech_bounds_complete_stream(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Enforce the size limit across all audio chunks."""
+    response = MockResponse(200, b"")
+    response.content = StreamReader(MagicMock(_reading_paused=False), limit=65536)
+    response.content.feed_data(b"first")
+    loop = asyncio.get_running_loop()
+    loop.call_soon(response.content.feed_data, b"second")
+    loop.call_soon(response.content.feed_eof)
+    websession.post.return_value = response
+
+    with (
+        patch("spacexai_subscription_client.client.MAX_TTS_SIZE", 8),
+        pytest.raises(InvalidResponseError),
+    ):
+        await client.async_synthesize_speech(
+            "access-token", text="Welcome home", voice_id="eve", language="en"
+        )
 
 
 @pytest.mark.parametrize(
