@@ -122,10 +122,11 @@ class SpaceXAISubscriptionClient:
         self, authorization: DeviceAuthorization
     ) -> OAuthToken:
         """Poll until the user approves device authorization."""
-        interval = authorization.interval
-
         while True:
-            await asyncio.sleep(interval)
+            remaining = authorization.expires_at_monotonic - monotonic()
+            if remaining <= 0:
+                raise DeviceAuthorizationExpiredError
+            await asyncio.sleep(min(authorization.interval, remaining))
             if monotonic() >= authorization.expires_at_monotonic:
                 raise DeviceAuthorizationExpiredError
             try:
@@ -143,6 +144,7 @@ class SpaceXAISubscriptionClient:
             except InvalidResponseError:
                 raise
             except TimeoutError as err:
+                authorization.interval *= 2
                 raise RequestTimeoutError from err
             except ClientError as err:
                 raise ConnectionFailureError from err
@@ -150,7 +152,9 @@ class SpaceXAISubscriptionClient:
             if response.status == HTTPStatus.OK:
                 return _oauth_token(payload)
 
-            interval = _next_poll_interval(response.status, payload, interval)
+            authorization.interval = _next_poll_interval(
+                response.status, payload, authorization.interval
+            )
 
     async def async_get_account(self, access_token: str) -> Account:
         """Return the authenticated account identity."""
