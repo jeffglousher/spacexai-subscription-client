@@ -32,10 +32,11 @@ jobs:
       - run: uv sync --locked
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
-      - run: uv run --no-sync mypy --strict src/spacexai_subscription_client
+      - run: uv run --no-sync mypy --strict src/spacexai_subscription_client script
       - run: uv run --no-sync pytest --cov=spacexai_subscription_client --cov-fail-under=95
       - run: uv build
       - run: uvx --from twine==7.0.0 twine check --strict dist/*
+      - run: uv run --no-sync python script/check_release.py --dist dist
       - name: Verify wheel installation
         run: >-
           uv run --isolated --no-project --python '${{ matrix.python-version }}'
