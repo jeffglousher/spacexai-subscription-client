@@ -79,6 +79,7 @@ from .models import (
     OAuthToken,
     ResponseFormat,
     ResponseTool,
+    Tool,
     ToolCall,
 )
 
@@ -123,7 +124,7 @@ class SpaceXAISubscriptionClient:
             interval = max(1, int(payload.get("interval", 5)))
             device_code = _required_string(payload, "device_code")
             user_code = _required_string(payload, "user_code")
-        except (KeyError, TypeError, ValueError) as err:
+        except (KeyError, OverflowError, TypeError, ValueError) as err:
             raise InvalidResponseError from err
         verification_uri_complete = payload.get(
             "verification_uri_complete", verification_uri
@@ -269,14 +270,24 @@ class SpaceXAISubscriptionClient:
             raise RateLimitError from err
         except openai.OpenAIError as err:
             raise SpaceXAISubscriptionError from err
-        tool_calls = tuple(
-            _parse_tool_call(item)
-            for item in response.output
-            if isinstance(item, ResponseFunctionToolCall)
-        )
-        if not response.output_text and not tool_calls:
+        try:
+            tool_calls = tuple(
+                _parse_tool_call(item)
+                for item in response.output
+                if isinstance(item, ResponseFunctionToolCall)
+            )
+            text = response.output_text
+        except (AttributeError, TypeError) as err:
+            raise InvalidResponseError from err
+        offered_tools = {tool.name for tool in tools if isinstance(tool, Tool)}
+        if (
+            not isinstance(response.output, list)
+            or not isinstance(text, str)
+            or (not text and not tool_calls)
+            or any(tool_call.name not in offered_tools for tool_call in tool_calls)
+        ):
             raise InvalidResponseError
-        return Completion(response.output_text or "", tool_calls)
+        return Completion(text, tool_calls)
 
     async def async_generate_image(
         self,
@@ -588,7 +599,12 @@ def _format_tool(tool: ResponseTool) -> ToolParam:
 
 def _parse_tool_call(item: ResponseFunctionToolCall) -> ToolCall:
     """Convert and validate an SDK tool call."""
-    if not item.call_id or not item.name:
+    if (
+        not isinstance(item.call_id, str)
+        or not item.call_id
+        or not isinstance(item.name, str)
+        or not item.name
+    ):
         raise InvalidResponseError
     try:
         arguments = json.loads(item.arguments)
@@ -673,9 +689,14 @@ def _oauth_token(payload: dict[str, Any]) -> OAuthToken:
         access_token = _required_string(payload, "access_token")
         refresh_token = _required_string(payload, "refresh_token")
         expires_in = int(payload["expires_in"])
-    except (KeyError, TypeError, ValueError) as err:
+    except (KeyError, OverflowError, TypeError, ValueError) as err:
         raise InvalidResponseError from err
-    if expires_in <= 0:
+    token_type = payload.get("token_type", "Bearer")
+    if (
+        expires_in <= 0
+        or not isinstance(token_type, str)
+        or token_type.casefold() != "bearer"
+    ):
         raise InvalidResponseError
     token = dict(payload)
     token.update(
