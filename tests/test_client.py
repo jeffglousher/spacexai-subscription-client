@@ -62,7 +62,7 @@ class MockResponse:
         return self._payload
 
 
-def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
+def _authorization(*, expires_in: int = 1800, interval: int = 1) -> DeviceAuthorization:
     """Return device authorization details."""
     return DeviceAuthorization(
         "device-code",
@@ -70,7 +70,7 @@ def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
         "https://auth.x.ai/device",
         "https://auth.x.ai/device",
         expires_in,
-        1,
+        interval,
         time.monotonic() + expires_in,
     )
 
@@ -285,7 +285,7 @@ async def test_device_token_uses_server_expiry(
     authorization = _authorization(expires_in=1800)
     with (
         patch(
-            "spacexai_subscription_client.client.time.monotonic",
+            "spacexai_subscription_client.client.monotonic",
             side_effect=[
                 authorization.expires_at_monotonic - 899,
                 authorization.expires_at_monotonic - 898,
@@ -301,12 +301,15 @@ async def test_device_token_uses_server_expiry(
     assert websession.post.call_count == 2
 
 
+@pytest.mark.parametrize("interval", [1, 30, 60])
 async def test_device_token_slow_down(
-    client: SpaceXAISubscriptionClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient, websession: MagicMock, interval: int
 ) -> None:
     """Increase the polling delay when requested by the OAuth server."""
     websession.post.side_effect = [
         MockResponse(400, {"error": "slow_down"}),
+        MockResponse(400, {"error": "slow_down"}),
+        MockResponse(400, {"error": "authorization_pending"}),
         MockResponse(
             200,
             {
@@ -320,9 +323,14 @@ async def test_device_token_slow_down(
     with patch(
         "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
     ) as sleep:
-        await client.async_poll_device_token(_authorization())
+        await client.async_poll_device_token(_authorization(interval=interval))
 
-    assert sleep.await_args_list == [call(1), call(6)]
+    assert sleep.await_args_list == [
+        call(interval),
+        call(interval + 5),
+        call(interval + 10),
+        call(interval + 10),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -389,7 +397,7 @@ async def test_device_token_deadline_is_not_reset_between_poll_attempts(
 
     with (
         patch(
-            "spacexai_subscription_client.client.time.monotonic",
+            "spacexai_subscription_client.client.monotonic",
             side_effect=[
                 authorization.expires_at_monotonic - 1,
                 authorization.expires_at_monotonic,

@@ -5,6 +5,7 @@ import json
 import time
 from collections.abc import Sequence
 from http import HTTPStatus
+from time import monotonic
 from typing import Any
 
 import openai
@@ -114,7 +115,7 @@ class SpaceXAISubscriptionClient:
             verification_uri_complete=verification_uri_complete,
             expires_in=expires_in,
             interval=interval,
-            expires_at_monotonic=time.monotonic() + expires_in,
+            expires_at_monotonic=monotonic() + expires_in,
         )
 
     async def async_poll_device_token(
@@ -125,7 +126,7 @@ class SpaceXAISubscriptionClient:
 
         while True:
             await asyncio.sleep(interval)
-            if time.monotonic() >= authorization.expires_at_monotonic:
+            if monotonic() >= authorization.expires_at_monotonic:
                 raise DeviceAuthorizationExpiredError
             try:
                 async with self._websession.post(
@@ -358,7 +359,7 @@ def _next_poll_interval(status: int, payload: dict[str, Any], interval: int) -> 
     if error == "authorization_pending":
         return interval
     if error == "slow_down":
-        return min(interval + 5, 30)
+        return interval + 5
     if error in ("access_denied", "authorization_denied"):
         raise AuthorizationDeniedError
     if error == "expired_token":
