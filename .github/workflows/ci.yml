@@ -4,7 +4,7 @@ name: CI
 "on":
   pull_request:
   push:
-    branches: [main]
+    branches: [main, harden-initial-release, "spacexai/client-*"]
 
 permissions:
   contents: read
@@ -34,3 +34,19 @@ jobs:
       - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync mypy --strict src/spacexai_subscription_client
       - run: uv run --no-sync pytest --cov=spacexai_subscription_client --cov-fail-under=95
+      - run: uv build
+      - run: uvx --from twine==7.0.0 twine check --strict dist/*
+      - name: Verify wheel installation
+        run: >-
+          uv run --isolated --no-project --python '${{ matrix.python-version }}'
+          --with dist/*.whl python -I -c
+          "from importlib.metadata import version;
+          from spacexai_subscription_client import SpaceXAISubscriptionClient;
+          print(version('spacexai-subscription-client'))"
+      - name: Verify source distribution installation
+        run: >-
+          uv run --isolated --no-project --python '${{ matrix.python-version }}'
+          --with dist/*.tar.gz python -I -c
+          "from importlib.metadata import version;
+          from spacexai_subscription_client import SpaceXAISubscriptionClient;
+          print(version('spacexai-subscription-client'))"
