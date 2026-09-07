@@ -6,9 +6,9 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DeviceAuthorization:
-    """Device authorization details shown to a user."""
+    """Device authorization details and current minimum polling interval."""
 
     device_code: str
     user_code: str
