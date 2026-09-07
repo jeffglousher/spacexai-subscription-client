@@ -295,10 +295,7 @@ async def test_device_token_uses_server_expiry(
     with (
         patch(
             "spacexai_subscription_client.client.monotonic",
-            side_effect=[
-                authorization.expires_at_monotonic - 899,
-                authorization.expires_at_monotonic - 898,
-            ],
+            return_value=authorization.expires_at_monotonic - 899,
         ),
         patch(
             "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
@@ -387,6 +384,46 @@ async def test_device_token_transport_error(
         await client.async_poll_device_token(_authorization())
 
 
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error", "retry_interval"),
+    [
+        pytest.param(ClientError(), ConnectionFailureError, 6, id="connection"),
+        pytest.param(TimeoutError(), RequestTimeoutError, 12, id="timeout"),
+    ],
+)
+async def test_device_token_retains_backoff_between_poll_attempts(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    side_effect: Exception,
+    expected_error: type[SpaceXAISubscriptionError],
+    retry_interval: int,
+) -> None:
+    """Retain server slow-down and timeout backoff when the caller retries."""
+    authorization = _authorization()
+    websession.post.side_effect = [
+        MockResponse(400, {"error": "slow_down"}),
+        side_effect,
+        MockResponse(
+            200,
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 3600,
+            },
+        ),
+    ]
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        with pytest.raises(expected_error):
+            await client.async_poll_device_token(authorization)
+        token = await client.async_poll_device_token(authorization)
+
+    assert token.data["access_token"] == "access-token"
+    assert sleep.await_args_list == [call(1), call(6), call(retry_interval)]
+
+
 async def test_device_token_deadline(
     client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
@@ -394,6 +431,30 @@ async def test_device_token_deadline(
     with pytest.raises(DeviceAuthorizationExpiredError):
         await client.async_poll_device_token(_authorization(expires_in=0))
 
+    websession.post.assert_not_called()
+
+
+async def test_device_token_deadline_bounds_polling_delay(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Expire promptly when the remaining lifetime is shorter than the interval."""
+    authorization = _authorization(interval=60)
+    with (
+        patch(
+            "spacexai_subscription_client.client.monotonic",
+            side_effect=[
+                authorization.expires_at_monotonic - 0.5,
+                authorization.expires_at_monotonic,
+            ],
+        ),
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(DeviceAuthorizationExpiredError),
+    ):
+        await client.async_poll_device_token(authorization)
+
+    sleep.assert_awaited_once_with(0.5)
     websession.post.assert_not_called()
 
 
@@ -408,6 +469,7 @@ async def test_device_token_deadline_is_not_reset_between_poll_attempts(
         patch(
             "spacexai_subscription_client.client.monotonic",
             side_effect=[
+                authorization.expires_at_monotonic - 1,
                 authorization.expires_at_monotonic - 1,
                 authorization.expires_at_monotonic,
             ],
