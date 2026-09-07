@@ -29,9 +29,10 @@ A pending publisher creates the PyPI project during the first successful trusted
 - [ ] Confirm every direct and transitive runtime dependency uses an OSI-approved license compatible with Home Assistant's Apache-2.0 distribution.
 - [ ] Confirm that pull-request CI passes on Python 3.12, 3.13, and 3.14.
 - [ ] Build locally with `uv build --clear`.
-- [ ] Check both artifacts with `uvx --from twine==7.0.0 twine check dist/*`.
+- [ ] Check both artifacts with `uvx --from twine==7.0.0 twine check --strict dist/*`.
 - [ ] Inspect the wheel for `spacexai_subscription_client/py.typed` and the Apache-2.0 license.
 - [ ] Inspect the source distribution for the package source, tests, README, changelog, license, and public workflows.
+- [ ] Confirm CI installs and imports both the wheel and the source distribution in isolated environments on every supported Python version.
 - [ ] Merge the release pull request to `main` without bypassing required checks.
 - [ ] Confirm the merged `main` commit is the exact commit intended for the release.
 
@@ -42,7 +43,7 @@ A pending publisher creates the PyPI project during the first successful trusted
 3. Use the `0.1.0` section of `CHANGELOG.md` as the release notes.
 4. Publish the GitHub release.
 5. Approve the `pypi` environment deployment when GitHub requests approval.
-6. Wait for both release jobs to pass. The build job repeats linting, typing, tests, coverage, artifact building, and Twine validation before the isolated publish job requests an OIDC credential.
+6. Wait for both release jobs to pass. The build job repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts before the isolated publish job requests an OIDC credential.
 
 Do not rerun publication with `skip-existing`. PyPI releases cannot be replaced; investigate a failed workflow before retrying it.
 
