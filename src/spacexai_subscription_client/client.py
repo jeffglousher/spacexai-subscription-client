@@ -519,15 +519,13 @@ class SpaceXAISubscriptionClient:
             ) as response:
                 if response.status >= HTTPStatus.BAD_REQUEST:
                     _raise_for_status(response.status, await _async_json(response))
-                audio = await response.content.read(MAX_TTS_SIZE + 1)
+                audio = await _async_read_speech(response)
         except SpaceXAISubscriptionError:
             raise
         except TimeoutError as err:
             raise RequestTimeoutError from err
         except ClientError as err:
             raise ConnectionFailureError from err
-        if not audio or len(audio) > MAX_TTS_SIZE:
-            raise InvalidResponseError
         return audio
 
     def _sdk(self, access_token: str) -> openai.AsyncOpenAI:
@@ -539,6 +537,18 @@ class SpaceXAISubscriptionClient:
             http_client=self._http_client,
             max_retries=SDK_MAX_RETRIES,
         )
+
+
+async def _async_read_speech(response: ClientResponse) -> bytes:
+    """Read the complete speech stream within the audio size limit."""
+    audio = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        if len(audio) + len(chunk) > MAX_TTS_SIZE:
+            raise InvalidResponseError
+        audio.extend(chunk)
+    if not audio:
+        raise InvalidResponseError
+    return bytes(audio)
 
 
 def _format_input(items: Sequence[InputItem]) -> ResponseInputParam:

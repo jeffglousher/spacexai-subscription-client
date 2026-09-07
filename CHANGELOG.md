@@ -8,6 +8,7 @@
 
 - Add batch speech transcription.
 - Add unary text-to-speech synthesis with language, voice, speed, and codec controls.
+- Read synthesized audio through the end of the stream, with bounded size and no partial result on interrupted transfers.
 
 ## 0.3.0
 
