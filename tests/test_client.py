@@ -1,20 +1,21 @@
 """Tests for the public Grok subscription client."""
 
 import time
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator, Sequence
 from typing import Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import openai
 import pytest
-from aiohttp import ClientError
-from httpx import Request, Response
+from aiohttp import ClientError, ClientSession
+from httpx import AsyncClient, MockTransport, Request, Response
 from openai.types.responses import ResponseFunctionToolCall
 
 from spacexai_subscription_client import (
     Account,
     AuthenticationError,
     AuthorizationDeniedError,
+    Completion,
     ConnectionFailureError,
     DeviceAuthorization,
     DeviceAuthorizationExpiredError,
@@ -231,6 +232,24 @@ async def test_device_authorization_server_error(
     websession.post.return_value = MockResponse(500, {})
 
     with pytest.raises(ConnectionFailureError):
+        await client.async_request_device_authorization()
+
+
+@pytest.mark.parametrize("field", ["expires_in", "interval"])
+async def test_device_authorization_numeric_overflow(
+    client: SpaceXAISubscriptionClient, websession: MagicMock, field: str
+) -> None:
+    """Reject JSON numbers too large to normalize as device timing values."""
+    payload = {
+        "device_code": "device-code",
+        "user_code": "ABCD-1234",
+        "verification_uri": "https://auth.x.ai/device",
+        "expires_in": 1800,
+    }
+    payload[field] = float("inf")
+    websession.post.return_value = MockResponse(200, payload)
+
+    with pytest.raises(InvalidResponseError):
         await client.async_request_device_authorization()
 
 
@@ -489,6 +508,14 @@ async def test_device_token_deadline_is_not_reset_between_poll_attempts(
             },
             id="invalid_expiry",
         ),
+        pytest.param(
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": float("inf"),
+            },
+            id="overflowing_expiry",
+        ),
     ],
 )
 async def test_device_token_invalid_success(
@@ -501,6 +528,55 @@ async def test_device_token_invalid_success(
 
     with pytest.raises(InvalidResponseError):
         await client.async_poll_device_token(_authorization())
+
+
+@pytest.mark.parametrize("token_type", [None, 123, "", "MAC"])
+async def test_device_token_rejects_unsupported_type(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    token_type: object,
+) -> None:
+    """Reject explicitly malformed or unsupported token authentication schemes."""
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": token_type,
+        },
+    )
+
+    with (
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+        pytest.raises(InvalidResponseError),
+    ):
+        await client.async_poll_device_token(_authorization())
+
+
+@pytest.mark.parametrize("token_type", ["Bearer", "bearer", "bEaReR"])
+async def test_device_token_type_is_case_insensitive(
+    client: SpaceXAISubscriptionClient, websession: MagicMock, token_type: str
+) -> None:
+    """Accept the OAuth-defined case-insensitive Bearer token type."""
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": token_type,
+        },
+    )
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ):
+        token = await client.async_poll_device_token(_authorization())
+
+    assert token.data["token_type"] == token_type
 
 
 async def test_account_authentication_error(
@@ -800,3 +876,180 @@ async def test_completion_invalid_response(
             input_data=[],
             tools=[],
         )
+
+
+@pytest.fixture
+async def wire_client(
+    wire_output: object,
+) -> AsyncGenerator[SpaceXAISubscriptionClient]:
+    """Use the real SDK to decode synthetic HTTP responses."""
+
+    def respond(request: Request) -> Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/responses"
+        return Response(
+            200,
+            json={
+                "id": "response-1",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "grok-4.6",
+                "output": wire_output,
+            },
+        )
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        yield SpaceXAISubscriptionClient(websession, http_client)
+
+
+@pytest.mark.parametrize(
+    ("wire_output", "tools"),
+    [
+        pytest.param(None, [], id="null-output"),
+        pytest.param({}, [], id="object-output"),
+        pytest.param([None], [], id="null-item"),
+        pytest.param(
+            [{"type": "message", "role": "assistant", "content": None}],
+            [],
+            id="null-message-content",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": 123}],
+                }
+            ],
+            [],
+            id="non-string-text",
+        ),
+        pytest.param(
+            [{"type": "function_call", "name": "HassTurnOn", "arguments": "{}"}],
+            [Tool("HassTurnOn", None, {})],
+            id="missing-call-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": 123,
+                    "name": "HassTurnOn",
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="non-string-call-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": {"invalid": "name"},
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="non-string-tool-name",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": None,
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="null-arguments",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": "{}",
+                }
+            ],
+            [],
+            id="no-tools-offered",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "NotOffered",
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="different-tool-offered",
+        ),
+    ],
+)
+async def test_completion_rejects_invalid_wire_response(
+    wire_client: SpaceXAISubscriptionClient, tools: Sequence[Tool]
+) -> None:
+    """Reject malformed SDK fields and tools absent from the actual request."""
+    with pytest.raises(InvalidResponseError):
+        await wire_client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Hello")],
+            tools=tools,
+        )
+
+
+@pytest.mark.parametrize(
+    ("wire_output", "tools", "expected"),
+    [
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                }
+            ],
+            [],
+            Completion("Hello", ()),
+            id="text-without-tools",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": '{"area":"kitchen"}',
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            Completion("", (ToolCall("call-1", "HassTurnOn", {"area": "kitchen"}),)),
+            id="offered-tool",
+        ),
+    ],
+)
+async def test_completion_accepts_valid_wire_response(
+    wire_client: SpaceXAISubscriptionClient,
+    tools: Sequence[Tool],
+    expected: Completion,
+) -> None:
+    """Keep supported text and offered function calls through the real SDK."""
+    assert (
+        await wire_client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Hello")],
+            tools=tools,
+        )
+        == expected
+    )
