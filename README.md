@@ -24,6 +24,10 @@ The caller owns both HTTP sessions and is responsible for closing them. Device
 authorization returns a code and URL that the application should present to the
 user while `async_poll_device_token` waits for approval.
 
+When retrying a transient polling failure, reuse the same `DeviceAuthorization`.
+It retains the original expiry and the current polling interval, including
+server-requested slow-down and exponential timeout backoff.
+
 ```python
 import aiohttp
 import httpx
