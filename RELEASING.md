@@ -36,6 +36,12 @@ A pending publisher creates the PyPI project during the first successful trusted
 - [ ] Merge the release pull request to `main` without bypassing required checks.
 - [ ] Confirm the merged `main` commit is the exact commit intended for the release.
 
+The release preflight requires the tag to identify the current `main` commit
+when the workflow starts. A stale tag or a tag on an unmerged branch is rejected.
+This proves source identity, not human review: the maintainer must still review
+the changes and approve publication. If `main` advances before preflight, inspect
+the new changes and prepare a release from the newly verified tip.
+
 ## Publish
 
 1. On GitHub, create a new release targeting the verified `main` commit.
@@ -43,7 +49,7 @@ A pending publisher creates the PyPI project during the first successful trusted
 3. Use the `0.1.0` section of `CHANGELOG.md` as the release notes.
 4. Publish the GitHub release.
 5. Approve the `pypi` environment deployment when GitHub requests approval.
-6. Wait for both release jobs to pass. The build job repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts before the isolated publish job requests an OIDC credential.
+6. Wait for preflight and all three Python release-check jobs to pass. Each job checks out the exact release commit and repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts. The artifact contract checks the release notes, package identity, Apache-2.0 license, typing marker, and source contents, including tests and workflows. Only the verified Python 3.14 distributions are passed to the isolated publish job; publication cannot proceed until the entire matrix succeeds.
 
 Do not rerun publication with `skip-existing`. PyPI releases cannot be replaced; investigate a failed workflow before retrying it.
 
