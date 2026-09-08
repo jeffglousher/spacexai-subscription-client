@@ -4,7 +4,11 @@ name: CI
 "on":
   pull_request:
   push:
-    branches: [main, harden-initial-release, "spacexai/client-*"]
+    branches:
+      - main
+      - harden-initial-release
+      - "spacexai/client-*"
+      - codex/initial-client-compatibility
 
 permissions:
   contents: read

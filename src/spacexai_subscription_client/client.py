@@ -236,6 +236,7 @@ class SpaceXAISubscriptionClient:
                     for tool in tools
                 ],
                 parallel_tool_calls=False,
+                store=False,
                 extra_headers={"x-grok-model-override": model},
                 timeout=RESPONSE_TIMEOUT,
             )
