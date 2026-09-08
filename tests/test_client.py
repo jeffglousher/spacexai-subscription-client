@@ -261,9 +261,19 @@ async def test_device_authorization_server_error(
         await client.async_request_device_authorization()
 
 
-@pytest.mark.parametrize("field", ["expires_in", "interval"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("expires_in", float("inf"), id="infinite_expiry"),
+        pytest.param("interval", float("inf"), id="infinite_interval"),
+        pytest.param("expires_in", 10**400, id="overflowing_expiry_timestamp"),
+    ],
+)
 async def test_device_authorization_numeric_overflow(
-    client: SpaceXAISubscriptionClient, websession: MagicMock, field: str
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    field: str,
+    value: float,
 ) -> None:
     """Reject JSON numbers too large to normalize as device timing values."""
     payload = {
@@ -272,7 +282,7 @@ async def test_device_authorization_numeric_overflow(
         "verification_uri": "https://auth.x.ai/device",
         "expires_in": 1800,
     }
-    payload[field] = float("inf")
+    payload[field] = value
     websession.post.return_value = MockResponse(200, payload)
 
     with pytest.raises(InvalidResponseError):
@@ -541,6 +551,14 @@ async def test_device_token_deadline_is_not_reset_between_poll_attempts(
                 "expires_in": float("inf"),
             },
             id="overflowing_expiry",
+        ),
+        pytest.param(
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 10**400,
+            },
+            id="overflowing_expiry_timestamp",
         ),
     ],
 )
