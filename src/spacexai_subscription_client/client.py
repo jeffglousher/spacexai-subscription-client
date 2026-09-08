@@ -102,6 +102,7 @@ class SpaceXAISubscriptionClient:
         try:
             verification_uri = _required_string(payload, "verification_uri")
             expires_in = int(payload["expires_in"])
+            expires_at_monotonic = monotonic() + expires_in
             interval = max(1, int(payload.get("interval", 5)))
             device_code = _required_string(payload, "device_code")
             user_code = _required_string(payload, "user_code")
@@ -123,7 +124,7 @@ class SpaceXAISubscriptionClient:
             verification_uri_complete=verification_uri_complete,
             expires_in=expires_in,
             interval=interval,
-            expires_at_monotonic=monotonic() + expires_in,
+            expires_at_monotonic=expires_at_monotonic,
         )
 
     async def async_poll_device_token(
@@ -411,6 +412,7 @@ def _oauth_token(payload: dict[str, Any]) -> OAuthToken:
         access_token = _required_string(payload, "access_token")
         refresh_token = _required_string(payload, "refresh_token")
         expires_in = int(payload["expires_in"])
+        expires_at = time.time() + expires_in
     except (KeyError, OverflowError, TypeError, ValueError) as err:
         raise InvalidResponseError from err
     token_type = payload.get("token_type", "Bearer")
@@ -425,7 +427,7 @@ def _oauth_token(payload: dict[str, Any]) -> OAuthToken:
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=expires_in,
-        expires_at=time.time() + expires_in,
+        expires_at=expires_at,
     )
     token.setdefault("token_type", "Bearer")
     return OAuthToken(token)
