@@ -1,6 +1,8 @@
 # Releasing spacexai-subscription-client
 
-Releases are immutable and are published only by the public GitHub Actions workflow. Do not upload distributions with a local API token or with Twine from a workstation.
+Published PyPI files and version tags must not be replaced. Publishing uses only the public GitHub Actions workflow. Do not upload distributions with a local API token or with Twine from a workstation.
+
+Automation can prepare verification evidence, but only the maintainer can attest to reviewing and understanding the code and approve publication. Green checks and recorded license metadata do not constitute those manual attestations.
 
 ## One-time setup for 0.1.0
 
@@ -8,6 +10,9 @@ Releases are immutable and are published only by the public GitHub Actions workf
 - [ ] In the GitHub repository, create an environment named exactly `pypi`.
 - [ ] Configure the `pypi` environment to allow deployments only from tags matching `v*`.
 - [ ] Add the maintainer as a required reviewer for the `pypi` environment so every publication requires manual approval.
+- [ ] Disallow administrator bypass of the `pypi` environment's protection rules.
+- [ ] Protect `main` with the three Python CI checks and disallow force pushes and deletion.
+- [ ] Protect `v*` tags against updates and deletion.
 - [ ] In the PyPI account's **Publishing** settings, add a pending GitHub publisher with these exact values:
   - PyPI project name: `spacexai-subscription-client`
   - Owner: `jeffglousher`
@@ -25,7 +30,7 @@ A pending publisher creates the PyPI project during the first successful trusted
 - [ ] Confirm that the OAuth client identity and provider endpoints are still approved for this release.
 - [ ] Confirm that the package public API has no API-key authentication mode or fallback.
 - [ ] Confirm that GitHub Issues are enabled.
-- [ ] Run `uv tree --no-dev` and review the complete locked runtime dependency tree.
+- [ ] Run `uv tree --locked --no-dev` and retain the runtime names, versions, license metadata, and platform with the release evidence.
 - [ ] Confirm every direct and transitive runtime dependency uses an OSI-approved license compatible with Home Assistant's Apache-2.0 distribution.
 - [ ] Confirm that pull-request CI passes on Python 3.12, 3.13, and 3.14.
 - [ ] Build locally with `uv build --clear`.
@@ -48,8 +53,9 @@ the new changes and prepare a release from the newly verified tip.
 2. Create the tag `v0.1.0` and title the release `spacexai-subscription-client 0.1.0`.
 3. Use the `0.1.0` section of `CHANGELOG.md` as the release notes.
 4. Publish the GitHub release.
-5. Approve the `pypi` environment deployment when GitHub requests approval.
-6. Wait for preflight and all three Python release-check jobs to pass. Each job checks out the exact release commit and repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts. The artifact contract checks the release notes, package identity, Apache-2.0 license, typing marker, and source contents, including tests and workflows. Only the verified Python 3.14 distributions are passed to the isolated publish job; publication cannot proceed until the entire matrix succeeds.
+5. Wait for preflight and all three Python release-check jobs to pass. Each job checks out the exact release commit and repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts. The wheel contract rejects missing, unexpected, or duplicate members and verifies the required source bytes, identity, license, and typing marker. The source distribution check verifies required source bytes, including tests and workflows; it is not a universal archive-security audit. Only the verified Python 3.14 distributions are passed to the isolated publish job.
+6. The maintainer reviews the exact release commit and successful checks, then approves the `pypi` environment deployment when GitHub requests approval. This approval must not be performed by an agent on the maintainer's behalf.
+7. Wait for publication to succeed, then complete the post-publication checks below.
 
 Do not rerun publication with `skip-existing`. PyPI releases cannot be replaced; investigate a failed workflow before retrying it.
 
