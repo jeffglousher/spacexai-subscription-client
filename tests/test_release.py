@@ -18,6 +18,8 @@ VERSION = "0.1.0"
 COMMIT = "a" * 40
 DISTRIBUTION = f"spacexai_subscription_client-{VERSION}"
 METADATA = f"{DISTRIBUTION}.dist-info/METADATA"
+WHEEL_FORMAT = f"{DISTRIBUTION}.dist-info/WHEEL"
+WHEEL_RECORD = f"{DISTRIBUTION}.dist-info/RECORD"
 TYPING_MARKER = "spacexai_subscription_client/py.typed"
 WHEEL_LICENSE = f"{DISTRIBUTION}.dist-info/licenses/LICENSE"
 
@@ -68,6 +70,8 @@ def artifact_files(project_dir: Path) -> tuple[dict[str, bytes], dict[str, bytes
         b"Version: 0.1.0\n"
         b"License-Expression: Apache-2.0\n"
     )
+    wheel[WHEEL_FORMAT] = b"Wheel-Version: 1.0\nTag: py3-none-any\n"
+    wheel[WHEEL_RECORD] = b""
     return wheel, source
 
 
@@ -156,6 +160,8 @@ def test_valid_artifacts(
         pytest.param(0, TYPING_MARKER, "Missing wheel", id="typing-marker"),
         pytest.param(0, WHEEL_LICENSE, "Missing wheel", id="wheel-license"),
         pytest.param(0, METADATA, "Missing wheel", id="wheel-metadata"),
+        pytest.param(0, WHEEL_FORMAT, "Missing wheel", id="wheel-format"),
+        pytest.param(0, WHEEL_RECORD, "Missing wheel", id="wheel-record"),
         pytest.param(1, "tests/test_client.py", "Missing source", id="tests"),
         pytest.param(
             1, ".github/workflows/release.yml", "Missing source", id="workflow"
@@ -195,6 +201,52 @@ def test_changed_artifact_content(
     artifact_files[index][member] = b"Unexpected replacement\n"
     dist = _write_artifacts(project_dir, artifact_files)
     with pytest.raises(ValueError, match="differs from source"):
+        validate_artifacts(project_dir, dist, VERSION)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param("unexpected.pth", id="startup-path"),
+        pytest.param(
+            f"{DISTRIBUTION}.data/purelib/unexpected.py", id="relocated-module"
+        ),
+        pytest.param("spacexai_subscription_client/unexpected.py", id="package-module"),
+        pytest.param("unexpected/__init__.py", id="extra-package"),
+    ],
+)
+def test_unexpected_wheel_member(
+    project_dir: Path,
+    artifact_files: tuple[dict[str, bytes], dict[str, bytes]],
+    member: str,
+) -> None:
+    """Reject installable files absent from the reviewed package source."""
+    artifact_files[0][member] = b"# Unexpected file\n"
+    dist = _write_artifacts(project_dir, artifact_files)
+    with pytest.raises(ValueError, match="Unexpected wheel files"):
+        validate_artifacts(project_dir, dist, VERSION)
+
+
+@pytest.mark.parametrize(
+    "member",
+    [
+        pytest.param(METADATA, id="metadata"),
+        pytest.param("spacexai_subscription_client/__init__.py", id="source"),
+    ],
+)
+def test_duplicate_wheel_member(
+    project_dir: Path,
+    artifact_files: tuple[dict[str, bytes], dict[str, bytes]],
+    member: str,
+) -> None:
+    """Reject duplicate archive names even when their bytes agree."""
+    dist = _write_artifacts(project_dir, artifact_files)
+    with (
+        ZipFile(dist / f"{DISTRIBUTION}-py3-none-any.whl", "a") as archive,
+        pytest.warns(UserWarning, match="Duplicate name"),
+    ):
+        archive.writestr(member, artifact_files[0][member])
+    with pytest.raises(ValueError, match="Duplicate wheel members"):
         validate_artifacts(project_dir, dist, VERSION)
 
 

@@ -72,6 +72,20 @@ def _check_content(root: Path, source: str, contents: bytes) -> None:
         raise ValueError(msg)
 
 
+def _check_wheel_members(wheel: ZipFile, expected: set[str]) -> None:
+    """Require each expected wheel member exactly once and no other files."""
+    members = wheel.namelist()
+    if len(members) != len(set(members)):
+        msg = "Duplicate wheel members"
+        raise ValueError(msg)
+    if missing := expected - set(members):
+        msg = f"Missing wheel files: {sorted(missing)}"
+        raise ValueError(msg)
+    if unexpected := set(members) - expected:
+        msg = f"Unexpected wheel files: {sorted(unexpected)}"
+        raise ValueError(msg)
+
+
 def validate_artifacts(root: Path, dist: Path, version: str) -> None:
     """Check the two publishable artifacts against the checked-out source."""
     distribution = f"{PACKAGE_NAME}-{version}"
@@ -93,10 +107,12 @@ def validate_artifacts(root: Path, dist: Path, version: str) -> None:
             if source.startswith("src/")
         }
         wheel_files[f"{distribution}.dist-info/licenses/LICENSE"] = "LICENSE"
-        missing = (wheel_files.keys() | {metadata_path}) - set(wheel.namelist())
-        if missing:
-            msg = f"Missing wheel files: {sorted(missing)}"
-            raise ValueError(msg)
+        expected = wheel_files.keys() | {
+            metadata_path,
+            f"{distribution}.dist-info/WHEEL",
+            f"{distribution}.dist-info/RECORD",
+        }
+        _check_wheel_members(wheel, expected)
         for member, source in wheel_files.items():
             _check_content(root, source, wheel.read(member))
         metadata = Parser().parsestr(wheel.read(metadata_path).decode("utf-8"))
