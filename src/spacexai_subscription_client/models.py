@@ -1,14 +1,14 @@
-"""Data models exposed by the SpaceXAI client."""
+"""Data models exposed by the Grok subscription client."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class DeviceAuthorization:
-    """Device authorization details shown to a user."""
+    """Device authorization details and current minimum polling interval."""
 
     device_code: str
     user_code: str
@@ -16,6 +16,7 @@ class DeviceAuthorization:
     verification_uri_complete: str
     expires_in: int
     interval: int
+    expires_at_monotonic: float = field(compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +36,7 @@ class OAuthToken:
 
 @dataclass(frozen=True, slots=True)
 class Account:
-    """Authenticated SpaceXAI account identity."""
+    """Authenticated Grok account identity."""
 
     subject: str
     name: str | None
@@ -49,7 +50,7 @@ class Account:
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """Conversation message sent to SpaceXAI."""
+    """Conversation message sent to Grok."""
 
     role: Literal["user", "assistant", "developer"]
     content: str
@@ -94,7 +95,7 @@ type InputItem = Message | ToolCall | ToolResult
 
 @dataclass(frozen=True, slots=True)
 class Completion:
-    """Normalized SpaceXAI completion."""
+    """Normalized Grok completion."""
 
     text: str
     tool_calls: tuple[ToolCall, ...]

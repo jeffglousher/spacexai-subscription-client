@@ -1,30 +1,43 @@
-"""Tests for the public SpaceXAI client."""
+"""Tests for the public Grok subscription client."""
 
-from collections.abc import Generator
+import time
+from collections.abc import AsyncGenerator, Generator, Sequence
 from typing import Any, Self
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import openai
 import pytest
-from aiohttp import ClientError
-from httpx import Request, Response
+from aiohttp import ClientError, ClientSession
+from httpx import AsyncClient, MockTransport, Request, Response
 from openai.types.responses import ResponseFunctionToolCall
 
-from spacexai_client import (
+from spacexai_subscription_client import (
     Account,
     AuthenticationError,
     AuthorizationDeniedError,
+    Completion,
     ConnectionFailureError,
     DeviceAuthorization,
+    DeviceAuthorizationExpiredError,
     InvalidResponseError,
     Message,
+    PermissionDeniedError,
     RateLimitError,
     RequestTimeoutError,
-    SpaceXAIClient,
-    SpaceXAIError,
+    SpaceXAISubscriptionClient,
+    SpaceXAISubscriptionError,
     Tool,
     ToolCall,
     ToolResult,
+)
+from spacexai_subscription_client.const import (
+    GROK_CLI_OAUTH_CLIENT_ID,
+    GROK_OAUTH_REQUEST_HEADERS,
+    MODEL_CATALOG_TIMEOUT,
+    OAUTH_REFERRER,
+    OAUTH_SCOPES,
+    RESPONSE_TIMEOUT,
+    SDK_MAX_RETRIES,
 )
 
 
@@ -50,7 +63,7 @@ class MockResponse:
         return self._payload
 
 
-def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
+def _authorization(*, expires_in: int = 1800, interval: int = 1) -> DeviceAuthorization:
     """Return device authorization details."""
     return DeviceAuthorization(
         "device-code",
@@ -58,13 +71,22 @@ def _authorization(*, expires_in: int = 1800) -> DeviceAuthorization:
         "https://auth.x.ai/device",
         "https://auth.x.ai/device",
         expires_in,
-        1,
+        interval,
+        time.monotonic() + expires_in,
     )
 
 
 _REQUEST = Request("POST", "https://api.example.test")
 _RESPONSE = Response(401, request=_REQUEST)
+_FORBIDDEN_RESPONSE = Response(403, request=_REQUEST)
 SDK_ERRORS = (
+    pytest.param(
+        openai.PermissionDeniedError(
+            "forbidden", response=_FORBIDDEN_RESPONSE, body=None
+        ),
+        PermissionDeniedError,
+        id="permission_denied",
+    ),
     pytest.param(
         openai.AuthenticationError("rejected", response=_RESPONSE, body=None),
         AuthenticationError,
@@ -85,7 +107,7 @@ SDK_ERRORS = (
         RateLimitError,
         id="rate_limit",
     ),
-    pytest.param(openai.OpenAIError("failed"), SpaceXAIError, id="sdk"),
+    pytest.param(openai.OpenAIError("failed"), SpaceXAISubscriptionError, id="sdk"),
 )
 
 
@@ -96,9 +118,9 @@ def websession() -> MagicMock:
 
 
 @pytest.fixture
-def client(websession: MagicMock) -> SpaceXAIClient:
-    """Return a SpaceXAI client."""
-    return SpaceXAIClient(websession, MagicMock())
+def client(websession: MagicMock) -> SpaceXAISubscriptionClient:
+    """Return a Grok subscription client."""
+    return SpaceXAISubscriptionClient(websession, MagicMock())
 
 
 @pytest.fixture
@@ -107,12 +129,15 @@ def sdk() -> Generator[MagicMock]:
     sdk = MagicMock()
     sdk.models.list = AsyncMock()
     sdk.responses.create = AsyncMock()
-    with patch("spacexai_client.client.openai.AsyncOpenAI", return_value=sdk):
+    with patch(
+        "spacexai_subscription_client.client.openai.AsyncOpenAI", return_value=sdk
+    ) as constructor:
+        sdk.constructor = constructor
         yield sdk
 
 
 async def test_device_authorization(
-    client: SpaceXAIClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
     """Parse a successful device authorization response."""
     websession.post.return_value = MockResponse(
@@ -130,6 +155,16 @@ async def test_device_authorization(
     assert authorization.user_code == "ABCD-1234"
     assert authorization.verification_uri_complete == "https://auth.x.ai/device"
     assert authorization.interval == 5
+    websession.post.assert_called_once_with(
+        "https://auth.x.ai/oauth2/device/code",
+        data={
+            "client_id": GROK_CLI_OAUTH_CLIENT_ID,
+            "referrer": OAUTH_REFERRER,
+            "scope": " ".join(OAUTH_SCOPES),
+        },
+        headers=GROK_OAUTH_REQUEST_HEADERS,
+        timeout=ANY,
+    )
 
 
 @pytest.mark.parametrize(
@@ -140,8 +175,8 @@ async def test_device_authorization(
     ],
 )
 async def test_device_authorization_transport_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     side_effect: Exception,
     websession: MagicMock,
 ) -> None:
@@ -175,11 +210,20 @@ async def test_device_authorization_transport_error(
             },
             id="invalid_expiry",
         ),
+        pytest.param(
+            {
+                "device_code": "",
+                "user_code": "ABCD-1234",
+                "verification_uri": "https://auth.x.ai/device",
+                "expires_in": 1800,
+            },
+            id="empty_device_code",
+        ),
         pytest.param(ValueError(), id="invalid_json"),
     ],
 )
 async def test_device_authorization_invalid_response(
-    client: SpaceXAIClient,
+    client: SpaceXAISubscriptionClient,
     payload: object,
     websession: MagicMock,
 ) -> None:
@@ -191,7 +235,7 @@ async def test_device_authorization_invalid_response(
 
 
 async def test_device_authorization_server_error(
-    client: SpaceXAIClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
     """Translate an authorization endpoint server error."""
     websession.post.return_value = MockResponse(500, {})
@@ -200,12 +244,52 @@ async def test_device_authorization_server_error(
         await client.async_request_device_authorization()
 
 
-async def test_device_token_polling(
-    client: SpaceXAIClient, websession: MagicMock
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("expires_in", float("inf"), id="infinite_expiry"),
+        pytest.param("interval", float("inf"), id="infinite_interval"),
+        pytest.param("expires_in", 10**400, id="overflowing_expiry_timestamp"),
+    ],
+)
+async def test_device_authorization_numeric_overflow(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    field: str,
+    value: float,
 ) -> None:
-    """Poll through authorization pending and normalize the OAuth token."""
+    """Reject JSON numbers too large to normalize as device timing values."""
+    payload = {
+        "device_code": "device-code",
+        "user_code": "ABCD-1234",
+        "verification_uri": "https://auth.x.ai/device",
+        "expires_in": 1800,
+    }
+    payload[field] = value
+    websession.post.return_value = MockResponse(200, payload)
+
+    with pytest.raises(InvalidResponseError):
+        await client.async_request_device_authorization()
+
+
+@pytest.mark.parametrize(
+    ("pending_status", "pending_payload"),
+    [
+        pytest.param(
+            400, {"error": "authorization_pending"}, id="authorization_pending"
+        ),
+        pytest.param(202, {}, id="accepted_without_token"),
+    ],
+)
+async def test_device_token_polling(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    pending_status: int,
+    pending_payload: dict[str, str],
+) -> None:
+    """Keep the polling interval until approval and return an isolated token copy."""
     websession.post.side_effect = [
-        MockResponse(400, {"error": "authorization_pending"}),
+        MockResponse(pending_status, pending_payload),
         MockResponse(
             200,
             {
@@ -217,21 +301,32 @@ async def test_device_token_polling(
     ]
     authorization = _authorization()
 
-    with patch("spacexai_client.client.asyncio.sleep", new_callable=AsyncMock):
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
         token = await client.async_poll_device_token(authorization)
 
     assert token.data["access_token"] == "access-token"
     assert token.data["refresh_token"] == "refresh-token"
     assert token.data["token_type"] == "Bearer"
     assert "expires_at" in token.data
+    persisted_token = token.as_dict()
+    assert persisted_token == token.data
+    persisted_token["access_token"] = "caller-modified-token"
+    assert token.data["access_token"] == "access-token"
+    assert sleep.await_args_list == [call(authorization.interval)] * 2
+    assert all(
+        request.kwargs["headers"] == GROK_OAUTH_REQUEST_HEADERS
+        for request in websession.post.call_args_list
+    )
 
 
-async def test_device_token_slow_down(
-    client: SpaceXAIClient, websession: MagicMock
+async def test_device_token_uses_server_expiry(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
-    """Increase the polling delay when requested by the OAuth server."""
+    """Continue polling for the full lifetime granted by the server."""
     websession.post.side_effect = [
-        MockResponse(400, {"error": "slow_down"}),
+        MockResponse(400, {"error": "authorization_pending"}),
         MockResponse(
             200,
             {
@@ -242,25 +337,69 @@ async def test_device_token_slow_down(
         ),
     ]
 
-    with patch("spacexai_client.client.asyncio.sleep", new_callable=AsyncMock) as sleep:
-        await client.async_poll_device_token(_authorization())
+    authorization = _authorization(expires_in=1800)
+    with (
+        patch(
+            "spacexai_subscription_client.client.monotonic",
+            return_value=authorization.expires_at_monotonic - 899,
+        ),
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+    ):
+        token = await client.async_poll_device_token(authorization)
 
-    sleep.assert_awaited_once_with(6)
+    assert token.data["access_token"] == "access-token"
+    assert websession.post.call_count == 2
+
+
+@pytest.mark.parametrize("interval", [1, 30, 60])
+async def test_device_token_slow_down(
+    client: SpaceXAISubscriptionClient, websession: MagicMock, interval: int
+) -> None:
+    """Increase the polling delay when requested by the OAuth server."""
+    websession.post.side_effect = [
+        MockResponse(400, {"error": "slow_down"}),
+        MockResponse(400, {"error": "slow_down"}),
+        MockResponse(400, {"error": "authorization_pending"}),
+        MockResponse(
+            200,
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 3600,
+            },
+        ),
+    ]
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        await client.async_poll_device_token(_authorization(interval=interval))
+
+    assert sleep.await_args_list == [
+        call(interval),
+        call(interval + 5),
+        call(interval + 10),
+        call(interval + 10),
+    ]
 
 
 @pytest.mark.parametrize(
     ("payload", "expected_error"),
     [
         pytest.param({"error": "access_denied"}, AuthorizationDeniedError, id="denied"),
-        pytest.param({"error": "expired_token"}, RequestTimeoutError, id="expired"),
+        pytest.param(
+            {"error": "expired_token"}, DeviceAuthorizationExpiredError, id="expired"
+        ),
         pytest.param({"error": "invalid_token"}, AuthenticationError, id="invalid"),
-        pytest.param({"error": "other"}, SpaceXAIError, id="other"),
-        pytest.param(ValueError(), InvalidResponseError, id="invalid_json"),
+        pytest.param({"error": "other"}, SpaceXAISubscriptionError, id="other"),
+        pytest.param(ValueError(), SpaceXAISubscriptionError, id="invalid_json"),
     ],
 )
 async def test_device_token_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     payload: object,
     websession: MagicMock,
 ) -> None:
@@ -279,8 +418,8 @@ async def test_device_token_error(
     ],
 )
 async def test_device_token_transport_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     side_effect: Exception,
     websession: MagicMock,
 ) -> None:
@@ -291,20 +430,114 @@ async def test_device_token_transport_error(
         await client.async_poll_device_token(_authorization())
 
 
+@pytest.mark.parametrize(
+    ("side_effect", "expected_error", "retry_interval"),
+    [
+        pytest.param(ClientError(), ConnectionFailureError, 6, id="connection"),
+        pytest.param(TimeoutError(), RequestTimeoutError, 12, id="timeout"),
+    ],
+)
+async def test_device_token_retains_backoff_between_poll_attempts(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    side_effect: Exception,
+    expected_error: type[SpaceXAISubscriptionError],
+    retry_interval: int,
+) -> None:
+    """Retain server slow-down and timeout backoff when the caller retries."""
+    authorization = _authorization()
+    websession.post.side_effect = [
+        MockResponse(400, {"error": "slow_down"}),
+        side_effect,
+        MockResponse(
+            200,
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 3600,
+            },
+        ),
+    ]
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        with pytest.raises(expected_error):
+            await client.async_poll_device_token(authorization)
+        token = await client.async_poll_device_token(authorization)
+
+    assert token.data["access_token"] == "access-token"
+    assert sleep.await_args_list == [call(1), call(6), call(retry_interval)]
+
+
 async def test_device_token_deadline(
-    client: SpaceXAIClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
     """Stop polling when device authorization has expired."""
-    with pytest.raises(RequestTimeoutError):
+    with pytest.raises(DeviceAuthorizationExpiredError):
         await client.async_poll_device_token(_authorization(expires_in=0))
 
     websession.post.assert_not_called()
+
+
+async def test_device_token_deadline_bounds_polling_delay(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Expire promptly when the remaining lifetime is shorter than the interval."""
+    authorization = _authorization(interval=60)
+    with (
+        patch(
+            "spacexai_subscription_client.client.monotonic",
+            side_effect=[
+                authorization.expires_at_monotonic - 0.5,
+                authorization.expires_at_monotonic,
+            ],
+        ),
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(DeviceAuthorizationExpiredError),
+    ):
+        await client.async_poll_device_token(authorization)
+
+    sleep.assert_awaited_once_with(0.5)
+    websession.post.assert_not_called()
+
+
+async def test_device_token_deadline_is_not_reset_between_poll_attempts(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
+    """Keep the original device-code deadline after a transient poll failure."""
+    authorization = _authorization(expires_in=1800)
+    websession.post.side_effect = ClientError
+
+    with (
+        patch(
+            "spacexai_subscription_client.client.monotonic",
+            side_effect=[
+                authorization.expires_at_monotonic - 1,
+                authorization.expires_at_monotonic - 1,
+                authorization.expires_at_monotonic,
+            ],
+        ),
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+    ):
+        with pytest.raises(ConnectionFailureError):
+            await client.async_poll_device_token(authorization)
+        with pytest.raises(DeviceAuthorizationExpiredError):
+            await client.async_poll_device_token(authorization)
+
+    assert websession.post.call_count == 1
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         pytest.param({}, id="missing_token"),
+        pytest.param(None, id="null_payload"),
+        pytest.param([], id="array_payload"),
         pytest.param(
             {
                 "access_token": "access-token",
@@ -313,10 +546,26 @@ async def test_device_token_deadline(
             },
             id="invalid_expiry",
         ),
+        pytest.param(
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": float("inf"),
+            },
+            id="overflowing_expiry",
+        ),
+        pytest.param(
+            {
+                "access_token": "access-token",
+                "refresh_token": "refresh-token",
+                "expires_in": 10**400,
+            },
+            id="overflowing_expiry_timestamp",
+        ),
     ],
 )
 async def test_device_token_invalid_success(
-    client: SpaceXAIClient,
+    client: SpaceXAISubscriptionClient,
     payload: object,
     websession: MagicMock,
 ) -> None:
@@ -327,8 +576,57 @@ async def test_device_token_invalid_success(
         await client.async_poll_device_token(_authorization())
 
 
+@pytest.mark.parametrize("token_type", [None, 123, "", "MAC"])
+async def test_device_token_rejects_unsupported_type(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    token_type: object,
+) -> None:
+    """Reject explicitly malformed or unsupported token authentication schemes."""
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": token_type,
+        },
+    )
+
+    with (
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+        pytest.raises(InvalidResponseError),
+    ):
+        await client.async_poll_device_token(_authorization())
+
+
+@pytest.mark.parametrize("token_type", ["Bearer", "bearer", "bEaReR"])
+async def test_device_token_type_is_case_insensitive(
+    client: SpaceXAISubscriptionClient, websession: MagicMock, token_type: str
+) -> None:
+    """Accept the OAuth-defined case-insensitive Bearer token type."""
+    websession.post.return_value = MockResponse(
+        200,
+        {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": token_type,
+        },
+    )
+
+    with patch(
+        "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+    ):
+        token = await client.async_poll_device_token(_authorization())
+
+    assert token.data["token_type"] == token_type
+
+
 async def test_account_authentication_error(
-    client: SpaceXAIClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
     """Translate a rejected account token."""
     websession.get.return_value = MockResponse(401, {"error": "invalid_token"})
@@ -337,7 +635,32 @@ async def test_account_authentication_error(
         await client.async_get_account("bad-token")
 
 
-async def test_account(client: SpaceXAIClient, websession: MagicMock) -> None:
+@pytest.mark.parametrize(
+    ("status", "expected_error"),
+    [
+        pytest.param(401, AuthenticationError, id="authentication"),
+        pytest.param(403, PermissionDeniedError, id="permission_denied"),
+        pytest.param(408, RequestTimeoutError, id="request_timeout"),
+        pytest.param(429, RateLimitError, id="rate_limit"),
+        pytest.param(500, ConnectionFailureError, id="server"),
+    ],
+)
+async def test_account_non_json_error(
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
+    status: int,
+    websession: MagicMock,
+) -> None:
+    """Classify HTTP errors even when the response body is not JSON."""
+    websession.get.return_value = MockResponse(status, ValueError())
+
+    with pytest.raises(expected_error):
+        await client.async_get_account("access-token")
+
+
+async def test_account(
+    client: SpaceXAISubscriptionClient, websession: MagicMock
+) -> None:
     """Return a normalized account identity."""
     websession.get.return_value = MockResponse(
         200, {"sub": "account-123", "email": "home@example.test"}
@@ -358,7 +681,7 @@ async def test_account(client: SpaceXAIClient, websession: MagicMock) -> None:
     ],
 )
 async def test_account_invalid_response(
-    client: SpaceXAIClient,
+    client: SpaceXAISubscriptionClient,
     payload: object,
     websession: MagicMock,
 ) -> None:
@@ -377,8 +700,8 @@ async def test_account_invalid_response(
     ],
 )
 async def test_account_transport_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     side_effect: Exception,
     websession: MagicMock,
 ) -> None:
@@ -389,7 +712,7 @@ async def test_account_transport_error(
         await client.async_get_account("access-token")
 
 
-async def test_models(client: SpaceXAIClient, sdk: MagicMock) -> None:
+async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> None:
     """Return a sorted model catalog."""
     sdk.models.list.return_value = MagicMock(
         data=[MagicMock(id="grok-4.6"), MagicMock(id="grok-4.5")]
@@ -398,12 +721,14 @@ async def test_models(client: SpaceXAIClient, sdk: MagicMock) -> None:
     models = await client.async_list_models("access-token")
 
     assert models == ("grok-4.5", "grok-4.6")
+    sdk.models.list.assert_awaited_once_with(timeout=MODEL_CATALOG_TIMEOUT)
+    assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
 
 
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)
 async def test_model_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     sdk: MagicMock,
     sdk_error: openai.OpenAIError,
 ) -> None:
@@ -414,7 +739,9 @@ async def test_model_error(
         await client.async_list_models("access-token")
 
 
-async def test_invalid_model_catalog(client: SpaceXAIClient, sdk: MagicMock) -> None:
+async def test_invalid_model_catalog(
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
+) -> None:
     """Reject an invalid model catalog."""
     sdk.models.list.return_value = MagicMock(data=[MagicMock(id=None)])
 
@@ -422,7 +749,31 @@ async def test_invalid_model_catalog(client: SpaceXAIClient, sdk: MagicMock) -> 
         await client.async_list_models("access-token")
 
 
-async def test_completion(client: SpaceXAIClient, sdk: MagicMock) -> None:
+@pytest.mark.parametrize(
+    "wire_data",
+    [
+        pytest.param(None, id="null_catalog"),
+        pytest.param([{}], id="missing_model_id"),
+    ],
+)
+async def test_invalid_model_catalog_wire_response(wire_data: object) -> None:
+    """Reject malformed model fields decoded by the real provider SDK."""
+
+    def respond(request: Request) -> Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return Response(200, json={"object": "list", "data": wire_data})
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        client = SpaceXAISubscriptionClient(websession, http_client)
+        with pytest.raises(InvalidResponseError):
+            await client.async_list_models("access-token")
+
+
+async def test_completion(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> None:
     """Normalize text and client-side tool calls."""
     response = MagicMock()
     response.output_text = "Calling a tool"
@@ -456,10 +807,12 @@ async def test_completion(client: SpaceXAIClient, sdk: MagicMock) -> None:
     assert request["model"] == "grok-4.6"
     assert request["parallel_tool_calls"] is False
     assert request["extra_headers"] == {"x-grok-model-override": "grok-4.6"}
+    assert request["timeout"] == RESPONSE_TIMEOUT
+    assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
 
 
 async def test_completion_formats_tool_history(
-    client: SpaceXAIClient, sdk: MagicMock
+    client: SpaceXAISubscriptionClient, sdk: MagicMock
 ) -> None:
     """Format prior tool calls and results for the SDK request."""
     response = MagicMock(output=[], output_text="Done")
@@ -495,13 +848,13 @@ async def test_completion_formats_tool_history(
             "output": '"done"',
         },
     ]
-    assert sdk.api_key == "new-access-token"
+    assert sdk.constructor.call_args_list[-1].kwargs["api_key"] == "new-access-token"
 
 
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)
 async def test_completion_error(
-    client: SpaceXAIClient,
-    expected_error: type[SpaceXAIError],
+    client: SpaceXAISubscriptionClient,
+    expected_error: type[SpaceXAISubscriptionError],
     sdk: MagicMock,
     sdk_error: openai.OpenAIError,
 ) -> None:
@@ -549,10 +902,38 @@ async def test_completion_error(
             ),
             id="invalid_arguments",
         ),
+        pytest.param(
+            MagicMock(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments="{}",
+                        call_id="",
+                        name="HassTurnOn",
+                        type="function_call",
+                    )
+                ],
+                output_text="",
+            ),
+            id="missing_call_id",
+        ),
+        pytest.param(
+            MagicMock(
+                output=[
+                    ResponseFunctionToolCall(
+                        arguments="{}",
+                        call_id="call-1",
+                        name="",
+                        type="function_call",
+                    )
+                ],
+                output_text="",
+            ),
+            id="missing_tool_name",
+        ),
     ],
 )
 async def test_completion_invalid_response(
-    client: SpaceXAIClient,
+    client: SpaceXAISubscriptionClient,
     response: MagicMock,
     sdk: MagicMock,
 ) -> None:
@@ -566,3 +947,180 @@ async def test_completion_invalid_response(
             input_data=[],
             tools=[],
         )
+
+
+@pytest.fixture
+async def wire_client(
+    wire_output: object,
+) -> AsyncGenerator[SpaceXAISubscriptionClient]:
+    """Use the real SDK to decode synthetic HTTP responses."""
+
+    def respond(request: Request) -> Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/responses"
+        return Response(
+            200,
+            json={
+                "id": "response-1",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "grok-4.6",
+                "output": wire_output,
+            },
+        )
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        yield SpaceXAISubscriptionClient(websession, http_client)
+
+
+@pytest.mark.parametrize(
+    ("wire_output", "tools"),
+    [
+        pytest.param(None, [], id="null-output"),
+        pytest.param({}, [], id="object-output"),
+        pytest.param([None], [], id="null-item"),
+        pytest.param(
+            [{"type": "message", "role": "assistant", "content": None}],
+            [],
+            id="null-message-content",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": 123}],
+                }
+            ],
+            [],
+            id="non-string-text",
+        ),
+        pytest.param(
+            [{"type": "function_call", "name": "HassTurnOn", "arguments": "{}"}],
+            [Tool("HassTurnOn", None, {})],
+            id="missing-call-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": 123,
+                    "name": "HassTurnOn",
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="non-string-call-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": {"invalid": "name"},
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="non-string-tool-name",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": None,
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="null-arguments",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": "{}",
+                }
+            ],
+            [],
+            id="no-tools-offered",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "NotOffered",
+                    "arguments": "{}",
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            id="different-tool-offered",
+        ),
+    ],
+)
+async def test_completion_rejects_invalid_wire_response(
+    wire_client: SpaceXAISubscriptionClient, tools: Sequence[Tool]
+) -> None:
+    """Reject malformed SDK fields and tools absent from the actual request."""
+    with pytest.raises(InvalidResponseError):
+        await wire_client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Hello")],
+            tools=tools,
+        )
+
+
+@pytest.mark.parametrize(
+    ("wire_output", "tools", "expected"),
+    [
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                }
+            ],
+            [],
+            Completion("Hello", ()),
+            id="text-without-tools",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "HassTurnOn",
+                    "arguments": '{"area":"kitchen"}',
+                }
+            ],
+            [Tool("HassTurnOn", None, {})],
+            Completion("", (ToolCall("call-1", "HassTurnOn", {"area": "kitchen"}),)),
+            id="offered-tool",
+        ),
+    ],
+)
+async def test_completion_accepts_valid_wire_response(
+    wire_client: SpaceXAISubscriptionClient,
+    tools: Sequence[Tool],
+    expected: Completion,
+) -> None:
+    """Keep supported text and offered function calls through the real SDK."""
+    assert (
+        await wire_client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Hello")],
+            tools=tools,
+        )
+        == expected
+    )

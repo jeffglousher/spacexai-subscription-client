@@ -1,1 +1,1 @@
-"""Tests for spacexai-client."""
+"""Tests for spacexai-subscription-client."""
