@@ -210,6 +210,15 @@ async def test_device_authorization_transport_error(
             },
             id="invalid_expiry",
         ),
+        pytest.param(
+            {
+                "device_code": "",
+                "user_code": "ABCD-1234",
+                "verification_uri": "https://auth.x.ai/device",
+                "expires_in": 1800,
+            },
+            id="empty_device_code",
+        ),
         pytest.param(ValueError(), id="invalid_json"),
     ],
 )
@@ -263,12 +272,24 @@ async def test_device_authorization_numeric_overflow(
         await client.async_request_device_authorization()
 
 
+@pytest.mark.parametrize(
+    ("pending_status", "pending_payload"),
+    [
+        pytest.param(
+            400, {"error": "authorization_pending"}, id="authorization_pending"
+        ),
+        pytest.param(202, {}, id="accepted_without_token"),
+    ],
+)
 async def test_device_token_polling(
-    client: SpaceXAISubscriptionClient, websession: MagicMock
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    pending_status: int,
+    pending_payload: dict[str, str],
 ) -> None:
-    """Poll through authorization pending and normalize the OAuth token."""
+    """Keep the polling interval until approval and return an isolated token copy."""
     websession.post.side_effect = [
-        MockResponse(400, {"error": "authorization_pending"}),
+        MockResponse(pending_status, pending_payload),
         MockResponse(
             200,
             {
@@ -282,13 +303,18 @@ async def test_device_token_polling(
 
     with patch(
         "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
-    ):
+    ) as sleep:
         token = await client.async_poll_device_token(authorization)
 
     assert token.data["access_token"] == "access-token"
     assert token.data["refresh_token"] == "refresh-token"
     assert token.data["token_type"] == "Bearer"
     assert "expires_at" in token.data
+    persisted_token = token.as_dict()
+    assert persisted_token == token.data
+    persisted_token["access_token"] = "caller-modified-token"
+    assert token.data["access_token"] == "access-token"
+    assert sleep.await_args_list == [call(authorization.interval)] * 2
     assert all(
         request.kwargs["headers"] == GROK_OAUTH_REQUEST_HEADERS
         for request in websession.post.call_args_list
@@ -510,6 +536,8 @@ async def test_device_token_deadline_is_not_reset_between_poll_attempts(
     "payload",
     [
         pytest.param({}, id="missing_token"),
+        pytest.param(None, id="null_payload"),
+        pytest.param([], id="array_payload"),
         pytest.param(
             {
                 "access_token": "access-token",
@@ -612,6 +640,7 @@ async def test_account_authentication_error(
     [
         pytest.param(401, AuthenticationError, id="authentication"),
         pytest.param(403, PermissionDeniedError, id="permission_denied"),
+        pytest.param(408, RequestTimeoutError, id="request_timeout"),
         pytest.param(429, RateLimitError, id="rate_limit"),
         pytest.param(500, ConnectionFailureError, id="server"),
     ],
@@ -718,6 +747,30 @@ async def test_invalid_model_catalog(
 
     with pytest.raises(InvalidResponseError):
         await client.async_list_models("access-token")
+
+
+@pytest.mark.parametrize(
+    "wire_data",
+    [
+        pytest.param(None, id="null_catalog"),
+        pytest.param([{}], id="missing_model_id"),
+    ],
+)
+async def test_invalid_model_catalog_wire_response(wire_data: object) -> None:
+    """Reject malformed model fields decoded by the real provider SDK."""
+
+    def respond(request: Request) -> Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return Response(200, json={"object": "list", "data": wire_data})
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        client = SpaceXAISubscriptionClient(websession, http_client)
+        with pytest.raises(InvalidResponseError):
+            await client.async_list_models("access-token")
 
 
 async def test_completion(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> None:
