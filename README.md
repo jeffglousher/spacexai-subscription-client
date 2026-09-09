@@ -76,6 +76,10 @@ Model discovery and response generation use explicit timeouts. SDK retries are
 disabled so callers receive a single stable failure and can apply their own
 retry policy without duplicating a response request.
 
+Response requests explicitly set `store=False`, matching the Grok Build sampler's
+default. This requests no Responses API storage; it is not a guarantee about the
+provider's other logging or retention policies.
+
 The OAuth client identity and provider endpoints are centralized in
 `spacexai_subscription_client.const` so an upstream identity decision can be
 adopted without changing the public client API.
@@ -88,6 +92,23 @@ Responses transport track the current public
 and [Grok Build source](https://github.com/xai-org/grok-build). Keeping this
 reference explicit makes upstream protocol changes reviewable without depending
 on or executing the Grok CLI.
+
+The subscription proxy checks `x-grok-client-version` against Grok Build versions.
+Sending this package's `0.1.0` version was rejected with HTTP 426; sending `1.0.24`
+with the same unofficial client identifier succeeded in a live request. We pin
+`GROK_BUILD_COMPATIBILITY_VERSION` to `1.0.24` as our tested interoperability
+convention. This is not a documented xAI protocol-version contract or a claim
+that the Grok CLI is installed. The User-Agent retains this package's own name
+and version, and `x-grok-client-identifier` remains
+`spacexai-subscription-client`. The separate, working OAuth UI-version header is
+unchanged. A future proxy incompatibility is returned to the caller without
+automatic retries or version negotiation.
+
+The reference is Grok Build commit
+[`75810042ca2762aa0b0fa17864f3f68823ccbea5`](https://github.com/xai-org/grok-build/tree/75810042ca2762aa0b0fa17864f3f68823ccbea5):
+the [`1.0.24` version](https://github.com/xai-org/grok-build/blob/75810042ca2762aa0b0fa17864f3f68823ccbea5/crates/codegen/xai-grok-version/Cargo.toml#L4),
+the [sampler's proxy version header](https://github.com/xai-org/grok-build/blob/75810042ca2762aa0b0fa17864f3f68823ccbea5/crates/codegen/xai-grok-sampler/src/client.rs#L554),
+and its [`store: false` default](https://github.com/xai-org/grok-build/blob/75810042ca2762aa0b0fa17864f3f68823ccbea5/crates/codegen/xai-grok-sampler/src/client.rs#L1188).
 
 ## Development
 

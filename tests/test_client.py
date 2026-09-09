@@ -1,7 +1,9 @@
 """Tests for the public Grok subscription client."""
 
+import json
 import time
 from collections.abc import AsyncGenerator, Generator, Sequence
+from importlib.metadata import version
 from typing import Any, Self
 from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
@@ -725,6 +727,105 @@ async def test_models(client: SpaceXAISubscriptionClient, sdk: MagicMock) -> Non
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES
 
 
+async def test_proxy_compatibility_and_response_storage() -> None:
+    """Keep proxy compatibility separate from truthful package identity on the wire."""
+    requests: list[Request] = []
+    responses = {
+        "/v1/models": {"object": "list", "data": [{"id": "grok-4.6"}]},
+        "/v1/responses": {
+            "id": "response-1",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "grok-4.6",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                }
+            ],
+        },
+    }
+
+    def respond(request: Request) -> Response:
+        requests.append(request)
+        return Response(200, json=responses[request.url.path])
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        client = SpaceXAISubscriptionClient(websession, http_client)
+        assert await client.async_list_models("access-token") == ("grok-4.6",)
+        assert await client.async_create_response(
+            "access-token",
+            model="grok-4.6",
+            input_data=[Message("user", "Hello")],
+            tools=[],
+        ) == Completion("Hello", ())
+
+    package_version = version("spacexai-subscription-client")
+    assert package_version != "1.0.24"
+    assert len(requests) == 2
+    for request in requests:
+        assert request.headers["x-grok-client-version"] == "1.0.24"
+        assert request.headers["user-agent"] == (
+            f"spacexai-subscription-client/{package_version}"
+        )
+        assert request.headers["x-grok-client-identifier"] == (
+            "spacexai-subscription-client"
+        )
+        assert request.headers["authorization"] == "Bearer access-token"
+    assert requests[0].method == "GET"
+    assert requests[1].method == "POST"
+    assert json.loads(requests[1].content)["store"] is False
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        pytest.param(b"Upgrade required", "text/plain", id="plain-text"),
+        pytest.param(
+            b'{"error": {"message": "Upgrade required"}}',
+            "application/json",
+            id="json",
+        ),
+    ],
+)
+async def test_proxy_upgrade_required_is_not_retried(
+    body: bytes, content_type: str
+) -> None:
+    """Propagate a proxy version rejection through the real SDK without retries."""
+    requests: list[Request] = []
+
+    def respond(request: Request) -> Response:
+        requests.append(request)
+        return Response(426, content=body, headers={"content-type": content_type})
+
+    async with (
+        ClientSession() as websession,
+        AsyncClient(transport=MockTransport(respond)) as http_client,
+    ):
+        client = SpaceXAISubscriptionClient(websession, http_client)
+        with pytest.raises(SpaceXAISubscriptionError) as model_error:
+            await client.async_list_models("access-token")
+        assert isinstance(model_error.value.__cause__, openai.APIStatusError)
+        assert model_error.value.__cause__.status_code == 426
+        assert len(requests) == 1
+
+        with pytest.raises(SpaceXAISubscriptionError) as response_error:
+            await client.async_create_response(
+                "access-token",
+                model="grok-4.6",
+                input_data=[Message("user", "Hello")],
+                tools=[],
+            )
+        assert isinstance(response_error.value.__cause__, openai.APIStatusError)
+        assert response_error.value.__cause__.status_code == 426
+        assert len(requests) == 2
+
+
 @pytest.mark.parametrize(("sdk_error", "expected_error"), SDK_ERRORS)
 async def test_model_error(
     client: SpaceXAISubscriptionClient,
@@ -806,6 +907,7 @@ async def test_completion(client: SpaceXAISubscriptionClient, sdk: MagicMock) ->
     request: dict[str, Any] = sdk.responses.create.call_args.kwargs
     assert request["model"] == "grok-4.6"
     assert request["parallel_tool_calls"] is False
+    assert request["store"] is False
     assert request["extra_headers"] == {"x-grok-model-override": "grok-4.6"}
     assert request["timeout"] == RESPONSE_TIMEOUT
     assert sdk.constructor.call_args.kwargs["max_retries"] == SDK_MAX_RETRIES

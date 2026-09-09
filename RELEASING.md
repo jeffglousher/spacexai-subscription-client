@@ -50,8 +50,8 @@ the new changes and prepare a release from the newly verified tip.
 ## Publish
 
 1. On GitHub, create a new release targeting the verified `main` commit.
-2. Create the tag `v0.1.0` and title the release `spacexai-subscription-client 0.1.0`.
-3. Use the `0.1.0` section of `CHANGELOG.md` as the release notes.
+2. Create the tag `v0.1.1` and title the release `spacexai-subscription-client 0.1.1`.
+3. Use the `0.1.1` section of `CHANGELOG.md` as the release notes.
 4. Publish the GitHub release.
 5. Wait for preflight and all three Python release-check jobs to pass. Each job checks out the exact release commit and repeats linting, typing, tests, coverage, artifact building, strict Twine validation, and isolated installation of both artifacts. The wheel contract rejects missing, unexpected, or duplicate members and verifies the required source bytes, identity, license, and typing marker. The source distribution check verifies required source bytes, including tests and workflows; it is not a universal archive-security audit. Only the verified Python 3.14 distributions are passed to the isolated publish job.
 6. The maintainer reviews the exact release commit and successful checks, then approves the `pypi` environment deployment when GitHub requests approval. This approval must not be performed by an agent on the maintainer's behalf.
@@ -61,15 +61,15 @@ Do not rerun publication with `skip-existing`. PyPI releases cannot be replaced;
 
 ## Verify after publishing
 
-- [ ] Confirm `https://pypi.org/project/spacexai-subscription-client/0.1.0/` is available.
-- [ ] Confirm PyPI shows version `0.1.0`, Python `>=3.12`, and license expression `Apache-2.0`.
+- [ ] Confirm `https://pypi.org/project/spacexai-subscription-client/0.1.1/` is available.
+- [ ] Confirm PyPI shows version `0.1.1`, Python `>=3.12`, and license expression `Apache-2.0`.
 - [ ] Confirm the PyPI project links include the source repository, issue tracker, and changelog.
-- [ ] Confirm PyPI provides both `spacexai_subscription_client-0.1.0-py3-none-any.whl` and `spacexai_subscription_client-0.1.0.tar.gz`.
+- [ ] Confirm PyPI provides both `spacexai_subscription_client-0.1.1-py3-none-any.whl` and `spacexai_subscription_client-0.1.1.tar.gz`.
 - [ ] Confirm PyPI shows trusted-publishing provenance and attestations for both files.
 - [ ] Confirm the PyPI publisher is now listed as a normal trusted publisher rather than a pending publisher.
-- [ ] In a clean environment, run `python -m pip install spacexai-subscription-client==0.1.0` and verify `python -c "from importlib.metadata import version; print(version('spacexai-subscription-client'))"` prints `0.1.0`.
+- [ ] In a clean environment, run `python -m pip install spacexai-subscription-client==0.1.1` and verify `python -c "from importlib.metadata import version; print(version('spacexai-subscription-client'))"` prints `0.1.1`.
 - [ ] Import `SpaceXAISubscriptionClient` from `spacexai_subscription_client` in the clean environment.
-- [ ] Confirm the Git tag `v0.1.0` points to the same commit used to build the published files.
-- [ ] Record the GitHub release, workflow, PyPI project, and `main...v0.1.0` comparison links in the Home Assistant Core PR.
+- [ ] Confirm the Git tag `v0.1.1` points to the same commit used to build the published files.
+- [ ] Record the GitHub release, workflow, PyPI project, and `v0.1.0...v0.1.1` comparison links in the Home Assistant Core PR.
 
 Only after these checks pass should the Home Assistant integration mark `dependency-transparency` as done and run its final hassfest validation.

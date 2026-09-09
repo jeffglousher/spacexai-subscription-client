@@ -6,16 +6,18 @@ USERINFO_URL = "https://auth.x.ai/oauth2/userinfo"
 DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code"
 API_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 GROK_CLI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
+# Tested proxy interoperability target, not this package's version; see README.
+GROK_BUILD_COMPATIBILITY_VERSION = "1.0.24"
 GROK_OAUTH_REQUEST_HEADERS = {
     "x-grok-client-surface": "ui",
     "x-grok-client-version": "0.1.0",
 }
 GROK_CLI_REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "spacexai-subscription-client/0.1.0",
+    "User-Agent": "spacexai-subscription-client/0.1.1",
     "x-xai-token-auth": "xai-grok-cli",
     "x-grok-client-identifier": "spacexai-subscription-client",
-    "x-grok-client-version": "0.1.0",
+    "x-grok-client-version": GROK_BUILD_COMPATIBILITY_VERSION,
 }
 OAUTH_SCOPES = (
     "openid",
