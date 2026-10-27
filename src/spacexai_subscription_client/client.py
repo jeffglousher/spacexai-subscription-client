@@ -10,7 +10,7 @@ from typing import Any
 
 import openai
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
-from httpx import AsyncClient as HttpxClient
+from httpx2 import AsyncClient as HttpxClient
 from openai.types.responses import (
     EasyInputMessageParam,
     FunctionToolParam,
