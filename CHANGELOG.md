@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Align with Home Assistant's OpenAI SDK 3.26.0 and caller-owned `httpx2` sessions.
+
 ## 0.1.1
 
 - Separate the tested Grok Build proxy compatibility version from this package's

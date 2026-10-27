@@ -30,7 +30,7 @@ server-requested slow-down and exponential timeout backoff.
 
 ```python
 import aiohttp
-import httpx
+import httpx2
 
 from spacexai_subscription_client import SpaceXAISubscriptionClient, Message
 
@@ -38,7 +38,7 @@ from spacexai_subscription_client import SpaceXAISubscriptionClient, Message
 async def connect() -> None:
     async with (
         aiohttp.ClientSession() as websession,
-        httpx.AsyncClient() as http_client,
+        httpx2.AsyncClient() as http_client,
     ):
         client = SpaceXAISubscriptionClient(websession, http_client)
         authorization = await client.async_request_device_authorization()

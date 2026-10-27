@@ -10,7 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 import openai
 import pytest
 from aiohttp import ClientError, ClientSession
-from httpx import AsyncClient, MockTransport, Request, Response
+from httpx2 import AsyncClient, MockTransport, Request, Response
 from openai.types.responses import ResponseFunctionToolCall
 
 from spacexai_subscription_client import (
