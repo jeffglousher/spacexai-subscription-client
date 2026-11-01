@@ -9,7 +9,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import openai
 import pytest
-from aiohttp import ClientError, ClientSession
+from aiohttp import ClientError, ClientSession, web
+from aiohttp.test_utils import TestServer
 from httpx2 import AsyncClient, MockTransport, Request, Response
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -138,6 +139,66 @@ def sdk() -> Generator[MagicMock]:
         yield sdk
 
 
+@pytest.mark.parametrize("field", ["verification_uri", "verification_uri_complete"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://auth.x.ai/device",
+        "https://evil.example/device",
+        "https://auth.x.ai.evil.example/device",
+        "https://user:password@auth.x.ai/device",
+        "https://auth.x.ai:444/device",
+        "https://auth.x.ai:invalid/device",
+        "https://[broken/device",
+        "https://auth.x.ai/\ndevice",
+        "/device",
+    ],
+)
+async def test_untrusted_verification_url(
+    client: SpaceXAISubscriptionClient, websession: MagicMock, field: str, url: str
+) -> None:
+    """Reject malformed or unexpected authorization origins in either link."""
+    payload = {
+        "device_code": "device-code",
+        "user_code": "ABCD-1234",
+        "verification_uri": "https://auth.x.ai/device",
+        "verification_uri_complete": "https://accounts.x.ai/device?code=ABCD-1234",
+        "expires_in": 1800,
+    }
+    payload[field] = url
+    websession.post.return_value = MockResponse(200, payload)
+    with pytest.raises(InvalidResponseError):
+        await client.async_request_device_authorization()
+
+
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("operation", ["device", "token", "userinfo"])
+async def test_auth_redirects_disabled(
+    client: SpaceXAISubscriptionClient,
+    websession: MagicMock,
+    status: int,
+    operation: str,
+) -> None:
+    """Refuse redirect responses without issuing another sensitive request."""
+    request = websession.get if operation == "userinfo" else websession.post
+    request.return_value = MockResponse(status, {})
+    if operation == "device":
+        call = client.async_request_device_authorization()
+    elif operation == "token":
+        call = client.async_poll_device_token(_authorization())
+    else:
+        call = client.async_get_account("access-token")
+    with (
+        patch(
+            "spacexai_subscription_client.client.asyncio.sleep", new_callable=AsyncMock
+        ),
+        pytest.raises(SpaceXAISubscriptionError),
+    ):
+        await call
+    assert request.call_count == 1
+    assert request.call_args.kwargs["allow_redirects"] is False
+
+
 async def test_device_authorization(
     client: SpaceXAISubscriptionClient, websession: MagicMock
 ) -> None:
@@ -166,6 +227,7 @@ async def test_device_authorization(
         },
         headers=GROK_OAUTH_REQUEST_HEADERS,
         timeout=ANY,
+        allow_redirects=False,
     )
 
 
@@ -1226,3 +1288,55 @@ async def test_completion_accepts_valid_wire_response(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize("operation", ["device", "token", "userinfo"])
+async def test_auth_redirect_target_receives_no_requests(
+    status: int,
+    operation: str,
+) -> None:
+    """Exercise real aiohttp transport with loopback-only fake credentials."""
+    received: list[str] = []
+    origins: list[str] = []
+
+    async def target(request: web.Request) -> web.Response:
+        received.append(request.method)
+        return web.json_response({})
+
+    target_app = web.Application()
+    target_app.router.add_route("*", "/target", target)
+    async with TestServer(target_app) as target_server:
+
+        async def redirect(request: web.Request) -> web.Response:
+            origins.append(request.method)
+            return web.Response(
+                status=status,
+                headers={"Location": str(target_server.make_url("/target"))},
+            )
+
+        origin_app = web.Application()
+        origin_app.router.add_route("*", "/auth", redirect)
+        async with TestServer(origin_app) as origin_server, ClientSession() as session:
+            url = str(origin_server.make_url("/auth"))
+            constant = {
+                "device": "DEVICE_CODE_URL",
+                "token": "TOKEN_URL",
+                "userinfo": "USERINFO_URL",
+            }[operation]
+            client = SpaceXAISubscriptionClient(session, MagicMock())
+            with patch(f"spacexai_subscription_client.client.{constant}", url):
+                if operation == "device":
+                    call = client.async_request_device_authorization()
+                elif operation == "token":
+                    call = client.async_poll_device_token(_authorization())
+                else:
+                    call = client.async_get_account("loopback-fake-token")
+                with pytest.raises(SpaceXAISubscriptionError):
+                    await call
+            assert origins == ["GET" if operation == "userinfo" else "POST"]
+            assert received == []
+            # Positive control proves the target is live and counting requests.
+            async with session.get(target_server.make_url("/target")) as response:
+                assert response.status == 200
+            assert received == ["GET"]

@@ -14,7 +14,7 @@ GROK_OAUTH_REQUEST_HEADERS = {
 }
 GROK_CLI_REQUEST_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "spacexai-subscription-client/0.1.2",
+    "User-Agent": "spacexai-subscription-client/0.1.3",
     "x-xai-token-auth": "xai-grok-cli",
     "x-grok-client-identifier": "spacexai-subscription-client",
     "x-grok-client-version": GROK_BUILD_COMPATIBILITY_VERSION,

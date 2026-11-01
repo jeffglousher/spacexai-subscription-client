@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Restrict device sign-in links to HTTPS on the provider authorization hosts.
+- Reject redirects for device authorization, token polling, and account identity requests.
+- Add malformed-link and real HTTP redirect regression coverage.
+
 ## 0.1.2
 
 - Align with Home Assistant's OpenAI SDK 3.26.0 and caller-owned `httpx2` sessions.
