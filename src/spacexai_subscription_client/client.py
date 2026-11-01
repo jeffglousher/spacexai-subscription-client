@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from http import HTTPStatus
 from time import monotonic
 from typing import Any
+from urllib.parse import urlsplit
 
 import openai
 from aiohttp import ClientError, ClientResponse, ClientSession, ClientTimeout
@@ -59,6 +60,27 @@ from .models import (
 )
 
 _TIMEOUT = ClientTimeout(total=HTTP_TIMEOUT)
+_ASCII_CONTROL_LIMIT = 32
+
+
+def _validate_verification_uri(value: str) -> None:
+    """Limit sign-in links to the provider's authorization origins."""
+    try:
+        url = urlsplit(value)
+        valid = (
+            not any(
+                char.isspace() or ord(char) < _ASCII_CONTROL_LIMIT for char in value
+            )
+            and url.scheme == "https"
+            and url.hostname in {"auth.x.ai", "accounts.x.ai"}
+            and url.username is None
+            and url.password is None
+            and url.port in (None, 443)
+        )
+    except ValueError as err:
+        raise InvalidResponseError from err
+    if not valid:
+        raise InvalidResponseError
 
 
 class SpaceXAISubscriptionClient:
@@ -80,6 +102,7 @@ class SpaceXAISubscriptionClient:
                     "scope": " ".join(OAUTH_SCOPES),
                 },
                 headers=GROK_OAUTH_REQUEST_HEADERS,
+                allow_redirects=False,
                 timeout=_TIMEOUT,
             ) as response:
                 payload = await _async_json(response)
@@ -109,6 +132,8 @@ class SpaceXAISubscriptionClient:
             or expires_in <= 0
         ):
             raise InvalidResponseError
+        _validate_verification_uri(verification_uri)
+        _validate_verification_uri(verification_uri_complete)
         return DeviceAuthorization(
             device_code=device_code,
             user_code=user_code,
@@ -139,6 +164,7 @@ class SpaceXAISubscriptionClient:
                         "device_code": authorization.device_code,
                     },
                     headers=GROK_OAUTH_REQUEST_HEADERS,
+                    allow_redirects=False,
                     timeout=_TIMEOUT,
                 ) as response:
                     payload = await _async_json(response)
@@ -163,6 +189,7 @@ class SpaceXAISubscriptionClient:
             async with self._websession.get(
                 USERINFO_URL,
                 headers={"Authorization": f"Bearer {access_token}"},
+                allow_redirects=False,
                 timeout=_TIMEOUT,
             ) as response:
                 payload = await _async_json(response)
@@ -397,6 +424,8 @@ def _next_poll_interval(status: int, payload: dict[str, Any], interval: int) -> 
 
 def _raise_for_status(status: int, payload: dict[str, Any]) -> None:
     """Translate an HTTP status into a stable client exception."""
+    if HTTPStatus.MULTIPLE_CHOICES <= status < HTTPStatus.BAD_REQUEST:
+        raise InvalidResponseError
     if status < HTTPStatus.BAD_REQUEST:
         return
     if status == HTTPStatus.UNAUTHORIZED or payload.get("error") in (
